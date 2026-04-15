@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>RYU 实时拓扑展示</title>
+    <script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.2/dist/vis-network.min.js"></script>
+    <style>
+        body { margin: 0; padding: 10px; background: #f5f5f5; }
+        #mynetwork { width: 100%; height: 850px; background: white; border: 1px solid #ccc; }
+        h2 { text-align: center; color: #2c3e50; }
+    </style>
+</head>
+<body>
+    <h2>RYU SDN 实时拓扑（自动刷新）</h2>
+    <div id="mynetwork"></div>
+
+    <script>
+        var network;
+        var nodes = new vis.DataSet();
+        var edges = new vis.DataSet();
+
+        function initNetwork() {
+            var container = document.getElementById('mynetwork');
+            var data = { nodes: nodes, edges: edges };
+            var options = {
+                nodes: { shape: 'box', font: { size: 14 }, margin: 10, color: { background: '#3498db' } },
+                edges: { width: 2, color: '#7f8c8d', arrows: 'to' },
+                physics: { enabled: true }
+            };
+            network = new vis.Network(container, data, options);
+        }
+
+        async function updateTopology() {
+            try {
+                let res = await fetch('/topology/data');
+                let topo = await res.json();
+
+                nodes.clear();
+                edges.clear();
+
+                // 添加交换机
+                topo.switches.forEach(s => {
+                    nodes.add({ id: s.dpid, label: '交换机\n' + s.dpid, color: '#e74c3c' });
+                });
+
+                // 添加链路
+                topo.links.forEach((link, idx) => {
+                    edges.add({ id: idx, from: link.src.dpid, to: link.dst.dpid });
+                });
+
+            } catch (e) { console.log('刷新失败', e); }
+        }
+
+        window.onload = function() {
+            initNetwork();
+            updateTopology();
+            setInterval(updateTopology, 2000); // 每2秒刷新
+        };
+    </script>
+</body>
+</html>
