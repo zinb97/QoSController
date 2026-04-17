@@ -6,9 +6,10 @@ from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ether_types
+from ryu.lib.packet import ipv4
 
 from ryu.topology import event, switches
-from ryu.topology.api import get_switch, get_link
+from ryu.topology.api import get_switch, get_link, get_host
 from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 import json
 import os
@@ -29,6 +30,7 @@ class SimpleSwitchTopo(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(SimpleSwitchTopo, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
+        self.hosts = {}  # MAC -> {ip, dpid, port}
         self.topology_data = {}  # 存储拓扑数据
 
         # 注册 Web API
@@ -53,7 +55,7 @@ class SimpleSwitchTopo(app_manager.RyuApp):
         mod = parser.OFPFlowMod(datapath=datapath, priority=priority, match=match, instructions=inst)
         datapath.send_msg(mod)
 
-    # 包处理：二层转发
+    # 包处理：二层转发 + 主机学习
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         msg = ev.msg
@@ -71,6 +73,25 @@ class SimpleSwitchTopo(app_manager.RyuApp):
         dst = eth.dst
         src = eth.src
         dpid = datapath.id
+
+        # 学习主机 MAC/IP
+        ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        if ip_pkt:
+            self.hosts[src] = {
+                'mac': src,
+                'ip': ip_pkt.src,
+                'dpid': dpid,
+                'port': in_port
+            }
+            self.logger.debug(f"Host learned: {src} -> IP={ip_pkt.src}, Switch={dpid}, Port={in_port}")
+        else:
+            self.hosts[src] = {
+                'mac': src,
+                'ip': None,
+                'dpid': dpid,
+                'port': in_port
+            }
+            self.logger.debug(f"Host learned: {src} -> Switch={dpid}, Port={in_port} (no IP)")
 
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
@@ -108,6 +129,11 @@ class SimpleSwitchTopo(app_manager.RyuApp):
         self.logger.info(f"新增链路: {ev.link.src} <-> {ev.link.dst}")
         self.update_topology()
 
+    @set_ev_cls(event.EventHostAdd)
+    def host_add_handler(self, ev):
+        self.logger.info(f"主机加入: MAC={ev.host.mac} {ev.host}")
+        self.update_topology()
+
     # 更新拓扑数据
     def update_topology(self):
         switch_list = get_switch(self)
@@ -127,9 +153,26 @@ class SimpleSwitchTopo(app_manager.RyuApp):
                 'dst': {'dpid': l.dst.dpid, 'port': l.dst.port_no}
             })
 
+        # 转换主机数据 - 使用 RYU 拓扑 API 获取的主机信息
+        hosts = []
+        host_list = get_host(self)
+        for h in host_list:
+            # h.mac 是 MAC 地址字符串
+            # h.port 是 SwitchPort 对象 (dpid, port_no)
+            # h.ipv4 是该主机拥有的 IP 地址集合
+            if h.port:
+                hosts.append({
+                    'mac': h.mac,
+                    'ip': list(h.ipv4)[0] if h.ipv4 else None,
+                    'dpid': h.port.dpid,
+                    'port': h.port.port_no
+                })
+                self.logger.debug(f"Host from API: {h.mac} @ Switch={h.port.dpid}:{h.port.port_no} IPs={h.ipv4}")
+
         self.topology_data = {
             'switches': switches,
-            'links': links
+            'links': links,
+            'hosts': hosts
         }
 
 # ===================== Web 服务（已修复所有报错） =====================
