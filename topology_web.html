@@ -402,6 +402,36 @@
             </div>
 
             <div class="sidebar-section">
+                <div class="section-title">Network Levels</div>
+                <div class="legend">
+                    <div class="legend-item">
+                        <div class="legend-color" style="background:#e74c3c"></div>
+                        <span>L1 - Core (核心层)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background:#f39c12"></div>
+                        <span>L2 - Aggregation (汇聚层)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background:#27ae60"></div>
+                        <span>L3 - Backbone Access (骨干接入)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background:#3498db"></div>
+                        <span>L4 - Province Core (省网核心)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background:#9b59b6"></div>
+                        <span>L5 - Province Access (省网接入)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background:#95a5a6"></div>
+                        <span>L6 - Metro Access (城域接入)</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
                 <div class="section-title">Display Options</div>
                 <div class="toggle-row">
                     <span class="toggle-label">Show Hosts</span>
@@ -446,6 +476,25 @@
         let showHosts = true;
         let currentHosts = [];
 
+        // 层级颜色映射
+        const levelColors = {
+            1: { bg: '#e74c3c', border: '#c0392b', shadow: 'rgba(231, 76, 60, 0.3)' },  // 核心层 - 红色
+            2: { bg: '#f39c12', border: '#d68910', shadow: 'rgba(243, 156, 18, 0.3)' }, // 汇聚层 - 橙色
+            3: { bg: '#27ae60', border: '#1e8449', shadow: 'rgba(39, 174, 96, 0.3)' }, // 骨干接入层 - 绿色
+            4: { bg: '#3498db', border: '#2471a3', shadow: 'rgba(52, 152, 219, 0.3)' }, // 省网核心层 - 蓝色
+            5: { bg: '#9b59b6', border: '#7d3c98', shadow: 'rgba(155, 89, 182, 0.3)' }, // 省网接入层 - 紫色
+            6: { bg: '#95a5a6', border: '#7f8c8d', shadow: 'rgba(149, 165, 166, 0.3)' }, // 城域接入层 - 灰色
+        };
+
+        function getSwitchColor(level) {
+            const colors = levelColors[level] || levelColors[3];
+            return {
+                background: colors.bg,
+                border: colors.border,
+                highlight: { background: colors.bg, border: colors.border }
+            };
+        }
+
         function initNetwork() {
             var container = document.getElementById('mynetwork');
             var data = { nodes: nodes, edges: edges };
@@ -453,9 +502,7 @@
                 nodes: {
                     shape: 'box',
                     font: { face: 'JetBrains Mono', size: 12, color: '#f0f6fc' },
-                    margin: 12,
-                    color: { background: '#e74c3c', border: '#c0392b', highlight: { background: '#e74c3c', border: '#ff6b6b' } },
-                    shadow: { enabled: true, color: 'rgba(231, 76, 60, 0.3)', size: 8, x: 0, y: 4 }
+                    margin: 12
                 },
                 edges: {
                     width: 2,
@@ -498,15 +545,17 @@
             document.getElementById('switchCount').textContent = topo.switches.length;
 
             const list = document.getElementById('switchList');
-            list.innerHTML = topo.switches.map(s => `
+            list.innerHTML = topo.switches.map(s => {
+                const levelColor = levelColors[s.level] || levelColors[3];
+                return `
                 <div class="switch-item">
-                    <div class="switch-icon">⬡</div>
+                    <div class="switch-icon" style="background:${levelColor.bg}">⬡</div>
                     <div class="switch-info">
-                        <div class="switch-name">Switch ${s.dpid}</div>
+                        <div class="switch-name">Switch ${s.dpid} (L${s.level})</div>
                         <div class="switch-dpid">DPID: 0x${s.dpid.toString(16).padStart(16, '0')}</div>
                     </div>
                 </div>
-            `).join('');
+            `}).join('');
 
             const hostList = document.getElementById('hostList');
             if (topo.hosts.length === 0) {
@@ -548,9 +597,15 @@
             nodes.clear();
             edges.clear();
 
-            // Add switches
+            // Add switches with level-based colors
             topo.switches.forEach(s => {
-                nodes.add({ id: s.dpid, label: 'Switch ' + s.dpid });
+                const colors = getSwitchColor(s.level);
+                nodes.add({
+                    id: s.dpid,
+                    label: 'Switch ' + s.dpid + ' (L' + s.level + ')',
+                    color: colors,
+                    shadow: { enabled: true, color: colors.shadow || 'rgba(0,0,0,0.2)', size: 8, x: 0, y: 4 }
+                });
             });
 
             // Add links between switches

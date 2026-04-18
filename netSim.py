@@ -20,10 +20,7 @@ class NetworkLevel(Enum):
     CORE             = 1  # 骨干核心层
     AGG              = 2  # 骨干汇聚层
     BACKBONE_ACCESS  = 3  # 骨干接入层
-    PROVINCE_CORE    = 4  # 省网核心层
-    PROVINCE_ACCESS  = 5  # 省网接入层
-    METRO_ACCESS     = 6  # 城域网接入层
-
+    PROVINCE         = 4
 
 # ==============================================================================
 # 1. 基础拓扑：双交换机拓扑
@@ -48,7 +45,7 @@ class DualSwitchTopo(Topo):
 # ==============================================================================
 class RingTopo(Topo):
     """可自定义节点数的环形拓扑"""
-    def build(self, n=10):
+    def build(self, n=5):
         switches = [self.addSwitch(f's{i}') for i in range(1, n+1)]
         # 每台交换机挂一台主机
         for i in range(n):
@@ -73,13 +70,17 @@ class ChinaBackboneTopo(Topo):
     - 第4~5位：设备编号
     命名规则：极简命名，杜绝超长网卡名
     """
-    def __init__(self, level=3, is_full=False, **params):
+    def __init__(self, level=3, is_full=False, prov_depth=2, prov_width=2, **params):
         """
         :param level: 仿真层级 1=仅核心 2=核心+汇聚 3=核心+汇聚+接入 4=+省网 5=+城域
         :param is_full: True=全量23省接入 False=简化5省
+        :param prov_depth: 省网树状拓扑深度（省网核心到主机层数，默认2）
+        :param prov_width: 省网树状拓扑每层宽度（省网接入节点数，默认2）
         """
         self.sim_level = level
         self.is_full = is_full
+        self.prov_depth = prov_depth
+        self.prov_width = prov_width
         super().__init__(**params)
         self._init_link_config()
         self.build_topo()
@@ -103,26 +104,17 @@ class ChinaBackboneTopo(Topo):
         self.agg = {}   # 汇聚节点
         self.acc = []   # 骨干接入节点
 
-        info("\n*** [1/6] 构建骨干核心层\n")
+        info(f"\n*** [1/{self.sim_level}] 构建骨干核心层\n")
         self._build_core()
         if self.sim_level < NetworkLevel.AGG.value: return
 
-        info("*** [2/6] 构建骨干汇聚层\n")
+        info(f"*** [2/{self.sim_level}] 构建骨干汇聚层\n")
         self._build_agg()
         if self.sim_level < NetworkLevel.BACKBONE_ACCESS.value: return
 
-        info("*** [3/6] 构建骨干接入层\n")
+        info(f"*** [3/{self.sim_level}] 构建骨干接入层\n")
         self._build_access()
-        if self.sim_level < NetworkLevel.PROVINCE_CORE.value: return
-
-        info("*** [4/6] 构建省网核心层\n")
-        self._build_all_provinces()
-        if self.sim_level < NetworkLevel.PROVINCE_ACCESS.value: return
-
-        info("*** [5/6] 构建省网接入层\n")
-        if self.sim_level < NetworkLevel.METRO_ACCESS.value: return
-
-        info("*** [6/6] 构建城域网接入层\n")
+        if self.sim_level < NetworkLevel.PROVINCE.value: return
 
     def _build_core(self):
         """核心层：北京、上海、广州 全互联"""
@@ -151,7 +143,7 @@ class ChinaBackboneTopo(Topo):
 
     def _build_access(self):
         """骨干接入层：简化5节点 / 全量23节点"""
-        node_cnt = 23 if self.is_full else 5
+        node_cnt = 23 if self.is_full else 6
         agg_list = list(self.agg.values())
         for i in range(1, node_cnt + 1):
             dpid = f'00000000{NetworkLevel.BACKBONE_ACCESS.value:02x}{i:02x}0001'
@@ -159,36 +151,9 @@ class ChinaBackboneTopo(Topo):
             self.acc.append(sw)
             # 负载均衡上联汇聚层
             self.addLink(sw, agg_list[(i-1) % len(agg_list)], **self.link_cfg['agg_acc'])
-
-    def _build_all_provinces(self):
-        for idx, uplink in enumerate(self.acc):
-            self._build_province(pid=idx+1, uplink=uplink)
-
-    def _build_province(self, pid, uplink):
-        info(f'    → 构建省份 {pid:02d}\n')
-        p_core = []
-        # 省网核心
-        for i in [1,2]:
-            dpid = f'00000000{NetworkLevel.PROVINCE_CORE.value:02x}{pid:02x}{i:02x}01'
-            sw = self.addSwitch(f'P{pid}C{i}', dpid=dpid, protocols='OpenFlow13')
-            p_core.append(sw)
-            self.addLink(sw, uplink, **self.link_cfg['acc_prov'])
-        self.addLink(p_core[0], p_core[1], **self.link_cfg['prov_core'])
-
-        # 城域核心
-        m_core = []
-        for i in range(1,7):
-            dpid = f'00000000{NetworkLevel.PROVINCE_ACCESS.value:02x}{pid:02x}{i:02x}01'
-            sw = self.addSwitch(f'P{pid}M{i}', dpid=dpid, protocols='OpenFlow13')
-            m_core.append(sw)
-            self.addLink(sw, p_core[0], **self.link_cfg['prov_metro'])
-            self.addLink(sw, p_core[1], **self.link_cfg['prov_metro'])
-
-        # 测试主机
-        h1 = self.addHost(f'PH{pid}_1', ip=f'10.{pid}.0.1/24')
-        h2 = self.addHost(f'PH{pid}_2', ip=f'10.{pid}.0.2/24')
-        self.addLink(h1, m_core[0])
-        self.addLink(h2, m_core[1])
+            # 末端交换机挂载主机
+            host = self.addHost(f'h{i}', ip=f'10.0.0.{i}/24')
+            self.addLink(sw, host)
 
 
 # ==============================================================================
@@ -201,13 +166,13 @@ topos = {
 }
 
 
-def run_chinanet(level=3, is_full=False):
+def run_chinanet(level=3, is_full=False, prov_depth=3, prov_width=3):
     """启动骨干网拓扑"""
-    topo = ChinaBackboneTopo(level=level, is_full=is_full)
+    topo = ChinaBackboneTopo(level=level, is_full=is_full, prov_depth=prov_depth, prov_width=prov_width)
     switch = partial(OVSSwitch, protocols='OpenFlow13')
     net = Mininet(topo=topo, controller=lambda n: RemoteController(n, ip='127.0.0.1'), switch=switch)
     net.start()
-    info(f"\n✅ 骨干网拓扑启动完成 | 仿真层级：{level} | 全量节点：{is_full}\n")
+    info(f"\n✅ 骨干网拓扑启动完成 | 仿真层级：{level} | 全量节点：{is_full} | 省网树(深{prov_depth}x宽{prov_width})\n")
     CLI(net)
     net.stop()
 
@@ -229,13 +194,15 @@ if __name__ == '__main__':
 
     # 命令行参数解析（增强版）
     parser = argparse.ArgumentParser(description='Mininet 拓扑仿真工具')
-    parser.add_argument('-t', '--type', default='dual', choices=['dual', 'ring', 'net'], help='拓扑类型')
+    parser.add_argument('-t', '--type', default='net', choices=['dual', 'ring', 'net'], help='拓扑类型')
     parser.add_argument('-l', '--level', type=int, default=3, help='net仿真层级 1~5')
     parser.add_argument('-f', '--full', action='store_true', help='启用全量23省接入节点')
+    parser.add_argument('--prov-depth', type=int, default=2, help='省网树状拓扑深度')
+    parser.add_argument('--prov-width', type=int, default=2, help='省网树状拓扑每层宽度')
     args = parser.parse_args()
 
     # 启动对应拓扑
     if args.type == 'net':
-        run_chinanet(level=args.level, is_full=args.full)
+        run_chinanet(level=args.level, is_full=args.full, prov_depth=args.prov_depth, prov_width=args.prov_width)
     else:
         run_base(args.type)
