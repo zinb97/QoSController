@@ -20,9 +20,10 @@ REST API 地址：`http://localhost:8080`
 sudo mn --topo linear,2 --controller remote,ip=127.0.0.1,port=6653 --switch ovsk,protocols=OpenFlow13
 
 # 自定义拓扑
-sudo python netSim.py -t dual
-sudo python netSim.py -t chinanet
-sudo python netSim.py -t ring
+sudo python netSim.py -t dual    # 双交换机测试拓扑
+sudo python netSim.py -t ring    # 环形网络拓扑
+sudo python netSim.py -t net      # 骨干网拓扑（默认层级3）
+sudo python netSim.py net -l 3 -f # 层级3 + 全量23省接入节点
 ```
 
 ### REST API 端点
@@ -34,28 +35,30 @@ sudo python netSim.py -t ring
 ## 架构
 
 ```
-QoSController.py            # RYU SDN 控制器（单文件）
-  ├── SimpleSwitchTopo        # 主应用类（OpenFlow 1.3）
+QoSController.py       # RYU SDN 控制器（单文件）
+  ├── QoSController      # 主应用类（OpenFlow 1.3）
   │   ├── MAC 地址学习（packet-in 时学习源 MAC/IP）
   │   ├── packet-in 事件处理（二层转发+流表下发）
-  │   └── 拓扑发现（EventSwitchEnter, EventLinkAdd, EventHostAdd）
-  └── TopologyController      # REST API 控制器
-      ├── GET /topology/data  → JSON 拓扑数据
-      └── GET /               → Web 可视化页面
+  │   ├── 拓扑发现（EventSwitchEnter, EventLinkAdd, EventHostAdd）
+  │   └── 最短路径计算（BFS）
+  └── TopologyController # REST API 控制器
+      ├── GET /topology/data → JSON 拓扑数据
+      └── GET /              → Web 可视化页面
 
-netSim.py                    # Mininet 拓扑生成器
-  ├── DualSwitchTopo          # 双交换机测试拓扑（2主机+2交换机）
-  ├── RingTopo                # 环形网络（n个交换机+主机）
-  └── ChinaBackboneTopo      # 骨干网拓扑（分层级：核心/汇聚/接入/省网/城域）
+netSim.py               # Mininet 拓扑生成器
+  ├── DualSwitchTopo     # 双交换机测试拓扑（2主机+2交换机）
+  ├── RingTopo           # 环形网络（n个交换机+主机）
+  └── ChinaBackboneTopo  # 骨干网分层拓扑
 
-topology_web.html            # 浏览器端拓扑可视化（vis-network，每 2 秒轮询，按层级显示不同颜色）
+topology_web.html       # 浏览器端拓扑可视化（vis-network，每 2 秒轮询）
 ```
 
 ## DPID 规范（ChinaBackboneTopo）
 
-DPID 为 16 进制 8 字节，格式：`00000000{L1}{L2}{ID}`
-- L1: 层级标识（1=核心, 2=汇聚, 3=骨干接入, 4=省网核心, 5=省网接入, 6=城域接入）
-- L2+ID: 区域/设备编号
+DPID 为 16 进制 8 字节，格式：`00000000{L1}{L2:02x}0001`
+- L1: 层级标识（1=核心, 2=汇聚, 3=骨干接入, 4+=省网/城域）
+- L2: 区域/设备编号
+- 末尾 0001: 固定标识
 
 ## ChinaBackboneTopo 仿真层级
 
@@ -66,8 +69,6 @@ DPID 为 16 进制 8 字节，格式：`00000000{L1}{L2}{ID}`
 | 3 | + 骨干接入层（默认 6 节点，可通过 -f 全量 23 节点） |
 | 4 | + 省网核心层 |
 | 5 | + 省网接入 + 城域核心层 |
-
-启动示例：`sudo python netSim.py net -l 3 -f`
 
 ### 省网树状拓扑参数
 省网结构：省网核心上联骨干接入层，省网接入层为树根直接挂载主机。

@@ -27,8 +27,9 @@ class QoSController(app_manager.RyuApp):
         super(QoSController, self).__init__(*args, **kwargs)
 
         # --- 核心数据存储 ---
-        self.hosts = {}  # mac -> {ip, dpid, port, mac}
-        self.inter_switch_ports = {}  # { dpid: set(port_no, port_no, ...) }
+        self.hosts = {}                 # mac -> {ip, dpid, port, mac}
+        self.ip_to_mac = {}             # ip -> mac
+        self.inter_switch_ports = {}    # { dpid: set(port_no, port_no, ...) }
 
         # --- 拓扑相关 ---
         self.links = []  # Web 展示用
@@ -86,14 +87,14 @@ class QoSController(app_manager.RyuApp):
 
         # 清除交换机所有流表
         mod = parser.OFPFlowMod(datapath=datapath, command=ofproto.OFPFC_DELETE,
-                                out_port=ofproto.OFPP_NONE, out_group=ofproto.OFPG_ANY)
+                                out_port=ofproto.OFPP_ANY, out_group=ofproto.OFPG_ANY)
         datapath.send_msg(mod)
         self.logger.info(f"[Switch Init] Clear all flow entries on Switch {datapath.id}")
 
         # 安装 Table-miss 流表项
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
-        self.add_flow(datapath, 0, match, actions)
+        self.add_flow(datapath, 0, match, actions, idle_timeout=0)
 
     # ==================== 核心：PacketIn 处理 ====================
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -114,7 +115,6 @@ class QoSController(app_manager.RyuApp):
         if eth.ethertype == ether.ETH_TYPE_IPV6:
             return
 
-
         dst_eth, src_eth = eth.dst, eth.src
         dpid = datapath.id
 
@@ -125,8 +125,8 @@ class QoSController(app_manager.RyuApp):
             src_ip_arp, dst_ip_arp = arp_pkt.src_ip, arp_pkt.dst_ip
             src_mac, dst_mac = arp_pkt.src_mac, arp_pkt.dst_mac
             arp_opcode = arp_pkt.opcode
-            arp_htype = arp_pkt.hwtype  # 硬件类型（1=以太网）
-            arp_ptype = arp_pkt.proto  # 协议类型（0x0800=IPv4）
+            arp_htype = arp_pkt.hwtype
+            arp_ptype = arp_pkt.proto
 
             # 2. 映射操作码为可读名称（兼容 RARP 等扩展）
             arp_op_name = {
@@ -160,6 +160,12 @@ class QoSController(app_manager.RyuApp):
                     if src_ip_arp and not self.hosts[src_eth]['ip']:
                         self.hosts[src_eth]['ip'] = src_ip_arp
 
+                if src_ip_arp:
+                    self.ip_to_mac[src_ip_arp] = src_eth
+
+            # ARP 包使用二层匹配 (Match dst MAC)
+            flow_match = parser.OFPMatch(in_port=in_port, eth_dst=dst_eth)
+
         elif ipv4_pkt:
             src_ip = ipv4_pkt.src
             dst_ip = ipv4_pkt.dst
@@ -188,8 +194,15 @@ class QoSController(app_manager.RyuApp):
             else:
                 self.logger.info(f"[PacketIn] SW:{dpid} proto:{str(proto)} {src_ip}-->{dst_ip}")
 
+            # IPv4 包使用三层匹配 (Match dst IP)
+            flow_match = parser.OFPMatch(in_port=in_port, eth_type=ether.ETH_TYPE_IP,ipv4_dst=dst_ip)
+            dst_eth = self.ip_to_mac[dst_ip] if dst_ip in self.ip_to_mac else dst_eth
+
         else:
-            pass
+            return
+
+        # ---------------- 路由决策逻辑 ----------------
+        out_port = ofproto.OFPP_FLOOD  # 默认洪泛
 
         if dst_eth in self.hosts:
             # 目标主机已知
@@ -218,15 +231,13 @@ class QoSController(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(out_port)]
 
         # 如果不是洪泛，安装流表以避免下次 PacketIn
-        if out_port != ofproto.OFPP_FLOOD:
-            # 精确匹配目的 MAC 和入端口
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst_eth)
+        if out_port != ofproto.OFPP_FLOOD and flow_match:
 
             if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                self.add_flow(datapath, 1, match, actions, msg.buffer_id)
+                self.add_flow(datapath, 1, flow_match, actions, msg.buffer_id)
                 return  # 有 buffer_id 不需要再发 packet_out
             else:
-                self.add_flow(datapath, 1, match, actions)
+                self.add_flow(datapath, 1, flow_match, actions)
 
         # 发送 PacketOut
         data = None
@@ -323,19 +334,25 @@ class QoSController(app_manager.RyuApp):
         )
 
     # ==================== 辅助方法：流表操作 ====================
-    def add_flow(self, datapath, priority, match, actions, buffer_id=None):
+    def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=30, hard_timeout=0):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                                             actions)]
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         if buffer_id:
-            mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
-                                    priority=priority, match=match,
-                                    instructions=inst)
+            mod = parser.OFPFlowMod(
+                datapath=datapath, buffer_id=buffer_id,
+                priority=priority, match=match,
+                instructions=inst,
+                idle_timeout=idle_timeout,  # 新增：空闲超时
+                hard_timeout=hard_timeout  # 新增：硬超时
+            )
         else:
-            mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
-                                    match=match, instructions=inst)
+            mod = parser.OFPFlowMod(
+                datapath=datapath, priority=priority,
+                match=match, instructions=inst,
+                idle_timeout = idle_timeout, hard_timeout = hard_timeout
+            )
         datapath.send_msg(mod)
 
     # ==================== 辅助方法：最短路径计算 (BFS) ====================
