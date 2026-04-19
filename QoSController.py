@@ -29,18 +29,18 @@ class QoSController(app_manager.RyuApp):
         # --- 核心数据存储 ---
         self.hosts = {}                 # mac -> {ip, dpid, port, mac}
         self.ip_to_mac = {}             # ip -> mac
-        self.inter_switch_ports = {}    # { dpid: set(port_no, port_no, ...) }
+        self.inter_switch_ports = {}    # { dpid: set(port_no, ...) }
+        self.datapaths = {}             # 新增：保存所有交换机
 
         # --- 拓扑相关 ---
-        self.links = []  # Web 展示用
-        self.graph = {}  # 邻接表: dpid -> {neighbor_dpid: out_port}
+        self.links = []
+        self.graph = {}
         self.topology_data = {"switches": [], "links": [], "hosts": []}
 
         # 注册 Web API
         wsgi = kwargs['wsgi']
         wsgi.register(TopologyController, {topology_api_name: self})
 
-        # 启动定时线程，每3秒强制刷新一次拓扑（兜底机制）
         self._topo_thread = hub.spawn(self._topology_loop)
 
     def _topology_loop(self):
@@ -55,12 +55,14 @@ class QoSController(app_manager.RyuApp):
     @set_ev_cls(event.EventSwitchEnter)
     def switch_enter_handler(self, ev):
         self.logger.info(f"交换机上线: DPID={ev.switch.dp.id}")
+        self.datapaths[ev.switch.dp.id] = ev.switch.dp  # 新增
         self.update_topology()
 
     @set_ev_cls(event.EventSwitchLeave)
     def switch_leave_handler(self, ev):
         dpid = ev.switch.dp.id
         self.logger.info(f"交换机离线: DPID={dpid}")
+        self.datapaths.pop(dpid, None)  # 新增
         self.update_topology()
 
     @set_ev_cls(event.EventLinkAdd)
@@ -85,13 +87,11 @@ class QoSController(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        # 清除交换机所有流表
         mod = parser.OFPFlowMod(datapath=datapath, command=ofproto.OFPFC_DELETE,
                                 out_port=ofproto.OFPP_ANY, out_group=ofproto.OFPG_ANY)
         datapath.send_msg(mod)
         self.logger.info(f"[Switch Init] Clear all flow entries on Switch {datapath.id}")
 
-        # 安装 Table-miss 流表项
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions, idle_timeout=0)
@@ -163,8 +163,9 @@ class QoSController(app_manager.RyuApp):
                 if src_ip_arp:
                     self.ip_to_mac[src_ip_arp] = src_eth
 
-            # ARP 包使用二层匹配 (Match dst MAC)
-            flow_match = parser.OFPMatch(in_port=in_port, eth_dst=dst_eth)
+            # # ARP 包使用二层匹配 (Match dst MAC)
+            # flow_match = parser.OFPMatch(in_port=in_port, eth_dst=dst_eth)
+            flow_match = None
 
         elif ipv4_pkt:
             src_ip = ipv4_pkt.src
@@ -202,51 +203,74 @@ class QoSController(app_manager.RyuApp):
             return
 
         # ---------------- 路由决策逻辑 ----------------
-        out_port = ofproto.OFPP_FLOOD  # 默认洪泛
-
         if dst_eth in self.hosts:
-            # 目标主机已知
+            # 已知单播：正常转发
             dst_dpid = self.hosts[dst_eth]['dpid']
             dst_port = self.hosts[dst_eth]['port']
 
             if dpid == dst_dpid:
-                # 同一台交换机，直接转发
                 out_port = dst_port
+                actions = [parser.OFPActionOutput(out_port)]
             else:
-                # 不同交换机，计算路由
                 path = self.get_shortest_path(dpid, dst_dpid)
                 if path and len(path) > 1:
-                    # 路径的下一跳
                     next_hop = path[1]
                     out_port = self.graph[dpid][next_hop]
-                    self.logger.debug(f"[Routing] Path from {dpid} to {dst_dpid}: {path}, Out port: {out_port}")
+                    actions = [parser.OFPActionOutput(out_port)]
                 else:
-                    self.logger.warning(f"[Routing] No path from {dpid} to {dst_dpid}, flooding")
-                    out_port = ofproto.OFPP_FLOOD
+                    return
         else:
-            # 目标主机未知，洪泛
-            out_port = ofproto.OFPP_FLOOD
+            if arp_pkt:
+                # ==================== 关键修改：未知ARP由控制器全网广播 ====================
+                self.logger.info(f"[ARP Flood] 未知IP {arp_pkt.dst_ip}，控制器向全网泛洪")
+                self.flood_arp_to_all_switches(msg.data)
+                return  # 已由控制器处理，当前包不再转发
+            else:
+                return  # 其他未知包直接丢弃
 
-        # 3. 执行动作：下发流表 + 发送 PacketOut
-        actions = [parser.OFPActionOutput(out_port)]
-
-        # 如果不是洪泛，安装流表以避免下次 PacketIn
+        # ---------------- 下发流表 & 发送包 ----------------
         if out_port != ofproto.OFPP_FLOOD and flow_match:
-
             if msg.buffer_id != ofproto.OFP_NO_BUFFER:
                 self.add_flow(datapath, 1, flow_match, actions, msg.buffer_id)
-                return  # 有 buffer_id 不需要再发 packet_out
+                return
             else:
                 self.add_flow(datapath, 1, flow_match, actions)
 
-        # 发送 PacketOut
-        data = None
-        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-            data = msg.data
-
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                  in_port=in_port, actions=actions, data=data)
+        data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
+        out = parser.OFPPacketOut(
+            datapath=datapath, buffer_id=msg.buffer_id,
+            in_port=in_port, actions=actions, data=data
+        )
         datapath.send_msg(out)
+
+    # ==================== 【核心新增】向所有交换机广播ARP ====================
+    def flood_arp_to_all_switches(self, data):
+        """控制器将ARP包发给所有交换机，每个交换机只向主机端口泛洪"""
+        for dpid, dp in self.datapaths.items():
+            ofproto = dp.ofproto
+            parser = dp.ofproto_parser
+
+            # 获取该交换机的 非级联端口（主机端口）
+            inter_ports = self.inter_switch_ports.get(dpid, set())
+            flood_ports = []
+            for sw in self.topology_data['switches']:
+                if sw['dpid'] == dpid:
+                    for p in sw['ports']:
+                        if p not in inter_ports:
+                            flood_ports.append(p)
+                    break
+
+            if not flood_ports:
+                continue
+
+            # 批量输出到主机端口
+            actions = [parser.OFPActionOutput(p) for p in flood_ports]
+            out = parser.OFPPacketOut(
+                datapath=dp, buffer_id=ofproto.OFP_NO_BUFFER,
+                in_port=ofproto.OFPP_CONTROLLER,
+                actions=actions, data=data
+            )
+            dp.send_msg(out)
 
     # ==================== 拓扑数据更新 ====================
     def update_topology(self):
@@ -328,10 +352,7 @@ class QoSController(app_manager.RyuApp):
             })
 
         self.topology_data = {'switches': switches_info, 'links': self.links, 'hosts': topo_hosts}
-
-        self.logger.debug(
-            f"Topology updated: {len(switches_info)} switches, {len(self.links)} links, {len(topo_hosts)} hosts"
-        )
+        self.logger.debug(f"Topology updated: {len(switches_info)} switches, {len(self.links)} links, {len(topo_hosts)} hosts")
 
     # ==================== 辅助方法：流表操作 ====================
     def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=30, hard_timeout=0):
@@ -344,14 +365,14 @@ class QoSController(app_manager.RyuApp):
                 datapath=datapath, buffer_id=buffer_id,
                 priority=priority, match=match,
                 instructions=inst,
-                idle_timeout=idle_timeout,  # 新增：空闲超时
-                hard_timeout=hard_timeout  # 新增：硬超时
+                idle_timeout=idle_timeout,
+                hard_timeout=hard_timeout
             )
         else:
             mod = parser.OFPFlowMod(
                 datapath=datapath, priority=priority,
                 match=match, instructions=inst,
-                idle_timeout = idle_timeout, hard_timeout = hard_timeout
+                idle_timeout=idle_timeout, hard_timeout=hard_timeout
             )
         datapath.send_msg(mod)
 
