@@ -1,4 +1,4 @@
-    # CLAUDE.md
+# CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -10,7 +10,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### RYU 控制器
 ```bash
+# 单独运行 QoS 控制器
 ryu-manager QoSController.py --wsapi-port 8080 --observe-links
+
+# 同时运行 QoS 控制器 + OFCTL REST API（流表/端口管理）
+ryu-manager QoSController.py ofctl_rest.py --wsapi-port 8080 --observe-links
 ```
 REST API 地址：`http://localhost:8080`
 
@@ -27,23 +31,38 @@ sudo python netSim.py net -l 3 -f # 层级3 + 全量23省接入节点
 ```
 
 ### REST API 端点
+
+**QoSController (端口 8080):**
 | 端点 | 说明 |
 |------|------|
 | `GET /` | Web 可视化界面 |
 | `GET /topology/data` | 拓扑 JSON 数据（交换机列表、链路列表、主机列表） |
+
+**OFCTL REST API (需要同时加载 ofctl_rest.py):**
+| 端点 | 说明 |
+|------|------|
+| `GET /stats/switches` | 所有交换机 DPID 列表 |
+| `GET /stats/flow/{dpid}` | 交换机流表条目 |
+| `GET /stats/port/{dpid}` | 交换机端口统计 |
+| `POST /stats/flowentry/add` | 添加流表条目 |
+| `DELETE /stats/flowentry/clear/{dpid}` | 清空流表 |
 
 ## 架构
 
 ```
 QoSController.py       # RYU SDN 控制器（单文件）
   ├── QoSController      # 主应用类（OpenFlow 1.3）
-  │   ├── MAC 地址学习（packet-in 时学习源 MAC/IP）
+  │   ├── MAC/IP 学习（packet-in 时学习源 MAC/IP）
   │   ├── packet-in 事件处理（二层转发+流表下发）
   │   ├── 拓扑发现（EventSwitchEnter, EventLinkAdd, EventHostAdd）
-  │   └── 最短路径计算（BFS）
+  │   ├── 最短路径计算（BFS）
+  │   └── ARP 代理处理
   └── TopologyController # REST API 控制器
       ├── GET /topology/data → JSON 拓扑数据
       └── GET /              → Web 可视化页面
+
+ofctl_rest.py           # RYU 标准 OFCTL REST API（OpenFlow 1.0~1.5 支持）
+                        # 提供流表、端口、Meter、Group 等管理接口
 
 netSim.py               # Mininet 拓扑生成器
   ├── DualSwitchTopo     # 双交换机测试拓扑（2主机+2交换机）
@@ -51,6 +70,8 @@ netSim.py               # Mininet 拓扑生成器
   └── ChinaBackboneTopo  # 骨干网分层拓扑
 
 topology_web.html       # 浏览器端拓扑可视化（vis-network，每 2 秒轮询）
+
+utils.py                # tc (traffic control) 统计解析工具
 ```
 
 ## DPID 规范（ChinaBackboneTopo）

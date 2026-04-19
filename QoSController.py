@@ -287,6 +287,12 @@ class QoSController(app_manager.RyuApp):
 
         # 维护 IP → MAC 映射
         if src_ip:
+            # 如果该 IP 之前属于别人，先删掉旧的记录（防止 IP 冲突漂移）
+            if src_ip in self.ip_to_mac and self.ip_to_mac[src_ip] != src_eth:
+                old_mac = self.ip_to_mac[src_ip]
+                del self.hosts[old_mac]
+                self.logger.warning(f"[IP Conflict] IP {src_ip} moved from {old_mac} to {src_eth}")
+
             self.ip_to_mac[src_ip] = src_eth
 
     def send_arp_reply(self, datapath, eth_pkt, arp_pkt, src_mac, src_ip, dst_mac, dst_ip, in_port):
