@@ -129,7 +129,7 @@ class QoSController(app_manager.RyuApp):
     # ==================== 独立函数：IPv4 报文处理 ====================
     def handle_ipv4(self, datapath, in_port, msg, eth, ipv4_pkt, pkt):
         """
-        统一处理 IPv4 报文（TCP/UDP/ICMP），原逻辑完全不变
+        统一处理 IPv4 报文（TCP/UDP/ICMP）
         """
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -137,12 +137,14 @@ class QoSController(app_manager.RyuApp):
         src_ip = ipv4_pkt.src
         dst_ip = ipv4_pkt.dst
         proto = ipv4_pkt.proto
-        dst_eth = eth.dst
+        dst_eth, src_eth = eth.dst, eth.src
 
         # 解析四层协议
         tcp_pkt = pkt.get_protocol(tcp.tcp)
         udp_pkt = pkt.get_protocol(udp.udp)
         icmp_pkt = pkt.get_protocol(icmp.icmp)
+
+        self._learn_host(dpid, in_port, src_eth, src_ip, proto_tag="IPv4")
 
         # 日志输出
         if tcp_pkt:
@@ -171,6 +173,7 @@ class QoSController(app_manager.RyuApp):
 
         # 路由与转发决策
         if dst_eth not in self.hosts:
+            self.send_arp_request_for_ip(datapath, src_eth, src_ip, dst_ip)
             return
 
         dst_dpid = self.hosts[dst_eth]['dpid']
@@ -221,21 +224,7 @@ class QoSController(app_manager.RyuApp):
 
         self.logger.info(f"[PacketIn] SW:{dpid} {arp_op_name} ETH:{src_eth}-->{dst_eth} | ARP:{src_mac}({src_ip_arp})-->{dst_mac}({dst_ip_arp})")
 
-        # 主机学习（只在非级联端口学习）
-        is_inter_switch_port = dpid in self.inter_switch_ports and in_port in self.inter_switch_ports[dpid]
-        if not is_inter_switch_port:
-            if src_eth not in self.hosts:
-                self.hosts[src_eth] = {'mac': src_mac, 'ip': src_ip_arp, 'dpid': dpid, 'port': in_port}
-                self.logger.info(f"[Host Learn] MAC:{src_mac} IP:{src_ip_arp} located at Switch {dpid} Port {in_port}")
-            elif self.hosts[src_eth]['dpid'] != dpid or self.hosts[src_eth]['port'] != in_port:
-                self.hosts[src_eth] = {'mac': src_mac, 'ip': src_ip_arp, 'dpid': dpid, 'port': in_port}
-                self.logger.info(f"[Host Move] MAC:{src_mac} IP:{src_ip_arp} located at Switch {dpid} Port {in_port}")
-            else:
-                if src_ip_arp and not self.hosts[src_eth]['ip']:
-                    self.hosts[src_eth]['ip'] = src_ip_arp
-
-            if src_ip_arp:
-                self.ip_to_mac[src_ip_arp] = src_eth
+        self._learn_host(dpid, in_port, src_eth, src_ip_arp, proto_tag="ARP")
 
         # ARP 请求
         if arp_opcode == arp.ARP_REQUEST:
@@ -261,6 +250,45 @@ class QoSController(app_manager.RyuApp):
             else:
                 self.logger.warning(f"[ARP Forward] 未知目标主机: {dst_mac}，丢弃")
 
+    # ==================== 【新增】通用主机学习函数 ====================
+    def _learn_host(self, dpid, in_port, src_eth, src_ip, proto_tag=""):
+        """
+        通用主机学习核心逻辑
+        :param dpid: 交换机 DPID
+        :param in_port: 入端口号
+        :param src_eth: 源 MAC 地址
+        :param src_ip: 源 IP 地址
+        :param proto_tag: 日志标签 (如 "ARP" 或 "IPv4")
+        """
+        # 只在非交换机级联端口学习主机
+        is_inter_switch_port = dpid in self.inter_switch_ports and in_port in self.inter_switch_ports[dpid]
+        if is_inter_switch_port:
+            return
+
+        # 学习源MAC + 源IP
+        if src_eth not in self.hosts:
+            self.hosts[src_eth] = {
+                'mac': src_eth,
+                'ip': src_ip,
+                'dpid': dpid,
+                'port': in_port
+            }
+            self.logger.info(f"[Host Learn {proto_tag}] MAC:{src_eth} IP:{src_ip} at Switch {dpid} Port {in_port}")
+        else:
+            # 更新位置或IP
+            old = self.hosts[src_eth]
+            if old['dpid'] != dpid or old['port'] != in_port:
+                self.hosts[src_eth]['dpid'] = dpid
+                self.hosts[src_eth]['port'] = in_port
+                self.logger.info(f"[Host Move {proto_tag}] MAC:{src_eth} at Switch {dpid} Port {in_port}")
+            # 更新IP（如果之前没有）
+            if src_ip and not self.hosts[src_eth]['ip']:
+                self.hosts[src_eth]['ip'] = src_ip
+
+        # 维护 IP → MAC 映射
+        if src_ip:
+            self.ip_to_mac[src_ip] = src_eth
+
     def send_arp_reply(self, datapath, eth_pkt, arp_pkt, src_mac, src_ip, dst_mac, dst_ip, in_port):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -282,8 +310,48 @@ class QoSController(app_manager.RyuApp):
         )
         datapath.send_msg(out)
 
+    def send_arp_request_for_ip(self, datapath, src_mac, src_ip, target_ip):
+        """
+        模拟源主机构造并发送 ARP Request，查询目标 IP 的 MAC
+        :param datapath: 收到 IPv4 报文的交换机（用于获取 ofproto/parser）
+        :param src_mac: 源主机 MAC
+        :param src_ip: 源主机 IP
+        :param target_ip: 需要查询的目标 IP
+        """
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        # 构造 ARP 请求报文
+        pkt = packet.Packet()
+        # 1. 以太网头：广播地址
+        pkt.add_protocol(ethernet.ethernet(
+            ethertype=ether.ETH_TYPE_ARP,
+            src=src_mac,
+            dst='ff:ff:ff:ff:ff:ff'
+        ))
+        # 2. ARP 头：Request 类型
+        pkt.add_protocol(arp.arp(
+            opcode=arp.ARP_REQUEST,
+            src_mac=src_mac,
+            src_ip=src_ip,
+            dst_mac='00:00:00:00:00:00',
+            dst_ip=target_ip
+        ))
+        pkt.serialize()
+
+        self.logger.info(f"[ARP Probe] 模拟 {src_ip}({src_mac}) 发送 ARP 请求查询 {target_ip}")
+        # 调用通用泛洪函数发送
+        self.flood_packet_to_all_host_ports(pkt.data)
+
     # ==================== ARP 全网泛洪 ====================
     def flood_arp_to_all_switches(self, data):
+        self.flood_packet_to_all_host_ports(data)
+
+    def flood_packet_to_all_host_ports(self, data):
+        """
+        通用泛洪：将数据包发送到所有交换机的非级联端口（主机侧端口）
+        :param data: 要发送的序列化报文数据
+        """
         for dpid, dp in self.datapaths.items():
             ofproto = dp.ofproto
             parser = dp.ofproto_parser
@@ -304,6 +372,37 @@ class QoSController(app_manager.RyuApp):
                 in_port=ofproto.OFPP_CONTROLLER, actions=actions, data=data
             )
             dp.send_msg(out)
+
+    def flood_arp_for_ip(self, target_ip):
+        """
+        构造针对目标IP的ARP请求并全网泛洪
+        :param target_ip: 需要查询MAC的目标IP地址
+        """
+        # 控制器虚拟MAC和IP（用于发送ARP请求，可根据实际网络调整）
+        controller_mac = '00:00:00:00:00:cc'
+        controller_ip = '10.0.0.254'
+
+        # 构造ARP请求报文
+        pkt = packet.Packet()
+        # 以太网层：广播目的MAC
+        pkt.add_protocol(ethernet.ethernet(
+            ethertype=ether.ETH_TYPE_ARP,
+            src=controller_mac,
+            dst='ff:ff:ff:ff:ff:ff'
+        ))
+        # ARP层：请求 target_ip 的MAC
+        pkt.add_protocol(arp.arp(
+            opcode=arp.ARP_REQUEST,
+            src_mac=controller_mac,
+            src_ip=controller_ip,
+            dst_mac='00:00:00:00:00:00',
+            dst_ip=target_ip
+        ))
+        pkt.serialize()
+
+        # 调用现有泛洪函数发送
+        self.flood_arp_to_all_switches(pkt.data)
+        self.logger.info(f"[ARP Flood Trigger] 已泛洪针对 IP {target_ip} 的ARP请求")
 
     # ==================== 拓扑更新 ====================
     def update_topology(self):
