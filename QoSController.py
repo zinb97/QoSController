@@ -1,10 +1,12 @@
 from ryu.base import app_manager
-from ryu.controller.handler import set_ev_cls
-from ryu.ofproto import ofproto_v1_3
+from ryu.controller import ofp_event
+from ryu.controller.handler import set_ev_cls, MAIN_DISPATCHER, CONFIG_DISPATCHER
+from ryu.ofproto import ofproto_v1_3, ether
 from ryu.topology import event
 from ryu.topology.api import get_switch, get_link, get_host
 from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 from ryu.lib import hub
+from ryu.lib.packet import packet, ethernet, arp, ipv4, icmp, tcp, udp, ipv6
 
 import json
 import os
@@ -26,6 +28,7 @@ class QoSController(app_manager.RyuApp):
 
         # --- 核心数据存储 ---
         self.hosts = {}  # mac -> {ip, dpid, port, mac}
+        self.inter_switch_ports = {}  # { dpid: set(port_no, port_no, ...) }
 
         # --- 拓扑相关 ---
         self.links = []  # Web 展示用
@@ -74,6 +77,166 @@ class QoSController(app_manager.RyuApp):
         self.logger.info(f"主机加入: MAC={ev.host.mac}, IP={ev.host.ipv4}, Switch={ev.host.port.dpid}:{ev.host.port.port_no}")
         self.update_topology()
 
+    # ==================== 交换机连接初始化 ====================
+    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
+    def switch_features_handler(self, ev):
+        datapath = ev.msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        # 清除交换机所有流表
+        mod = parser.OFPFlowMod(datapath=datapath, command=ofproto.OFPFC_DELETE,
+                                out_port=ofproto.OFPP_NONE, out_group=ofproto.OFPG_ANY)
+        datapath.send_msg(mod)
+        self.logger.info(f"[Switch Init] Clear all flow entries on Switch {datapath.id}")
+
+        # 安装 Table-miss 流表项
+        match = parser.OFPMatch()
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
+        self.add_flow(datapath, 0, match, actions)
+
+    # ==================== 核心：PacketIn 处理 ====================
+    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
+    def _packet_in_handler(self, ev):
+        msg = ev.msg
+        datapath = msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        in_port = msg.match['in_port']
+
+        pkt = packet.Packet(msg.data)
+        eth = pkt.get_protocols(ethernet.ethernet)[0]
+
+        # 忽略 LLDP 数据包
+        if eth.ethertype == ether.ETH_TYPE_LLDP:
+            return
+        # 忽略 IPv6 数据包
+        if eth.ethertype == ether.ETH_TYPE_IPV6:
+            return
+
+
+        dst_eth, src_eth = eth.dst, eth.src
+        dpid = datapath.id
+
+        arp_pkt = pkt.get_protocol(arp.arp)
+        ipv4_pkt = pkt.get_protocol(ipv4.ipv4)
+
+        if arp_pkt:
+            src_ip_arp, dst_ip_arp = arp_pkt.src_ip, arp_pkt.dst_ip
+            src_mac, dst_mac = arp_pkt.src_mac, arp_pkt.dst_mac
+            arp_opcode = arp_pkt.opcode
+            arp_htype = arp_pkt.hwtype  # 硬件类型（1=以太网）
+            arp_ptype = arp_pkt.proto  # 协议类型（0x0800=IPv4）
+
+            # 2. 映射操作码为可读名称（兼容 RARP 等扩展）
+            arp_op_name = {
+                1: "ARP Request",
+                2: "ARP Reply",
+                3: "RARP Request",
+                4: "RARP Reply"
+            }.get(arp_opcode, f"ARP Opcode {arp_opcode}")
+
+            # 3. 硬件/协议类型快速校验（可选，过滤非以太网+IPv4的ARP）
+            if arp_htype != 1 or arp_ptype != 0x0800:
+                self.logger.debug(f"[PacketIn] 非以太网IPv4 ARP，忽略: HTYPE={arp_htype}, PTYPE={hex(arp_ptype)}")
+                return
+
+            # 4. 结构化日志输出（参照 IPv4 格式，突出 MAC-IP 绑定）
+            self.logger.info(
+                f"[PacketIn] SW:{dpid} {arp_op_name} "
+                f"ETH: {src_eth}-->{dst_eth} | "
+                f"ARP: {src_mac}({src_ip_arp})-->{dst_mac}({dst_ip_arp})"
+            )
+
+            is_inter_switch_port = dpid in self.inter_switch_ports and in_port in self.inter_switch_ports[dpid]
+            if not is_inter_switch_port:
+                if src_eth not in self.hosts:
+                    self.hosts[src_eth] = {'mac': src_mac, 'ip': src_ip_arp, 'dpid': dpid, 'port': in_port}
+                    self.logger.info(f"[Host Learn] MAC:{src_mac} IP:{src_ip_arp} located at Switch {dpid} Port {in_port}")
+                elif self.hosts[src_eth]['dpid'] != dpid or self.hosts[src_eth]['port'] != in_port:
+                    self.hosts[src_eth] = {'mac': src_mac, 'ip': src_ip_arp, 'dpid': dpid, 'port': in_port}
+                    self.logger.info(f"[Host Move] MAC:{src_mac} IP:{src_ip_arp} located at Switch {dpid} Port {in_port}")
+                else:
+                    if src_ip_arp and not self.hosts[src_eth]['ip']:
+                        self.hosts[src_eth]['ip'] = src_ip_arp
+
+        elif ipv4_pkt:
+            src_ip = ipv4_pkt.src
+            dst_ip = ipv4_pkt.dst
+            proto = ipv4_pkt.proto
+
+            tcp_pkt = pkt.get_protocol(tcp.tcp)
+            udp_pkt = pkt.get_protocol(udp.udp)
+            icmp_pkt = pkt.get_protocol(icmp.icmp)
+
+            if tcp_pkt:
+                src_port = tcp_pkt.src_port
+                dst_port = tcp_pkt.dst_port
+                self.logger.info(f"[PacketIn] SW:{dpid} TCP {src_ip}:{src_port}-->{dst_ip}:{dst_port}")
+            elif udp_pkt:
+                src_port = udp_pkt.src_port
+                dst_port = udp_pkt.dst_port
+                self.logger.info(f"[PacketIn] SW:{dpid} UDP {src_ip}:{src_port}-->{dst_ip}:{dst_port}")
+            elif icmp_pkt:
+                icmp_type = icmp_pkt.type
+                if icmp_type == icmp.ICMP_ECHO_REQUEST:
+                    self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Request {src_ip}-->{dst_ip}")
+                elif icmp_type == icmp.ICMP_ECHO_REPLY:
+                    self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Reply {src_ip}-->{dst_ip}")
+                else:
+                    self.logger.info(f"[PacketIn] SW:{dpid} ICMP Type:{icmp_type} {src_ip}-->{dst_ip}")
+            else:
+                self.logger.info(f"[PacketIn] SW:{dpid} proto:{str(proto)} {src_ip}-->{dst_ip}")
+
+        else:
+            pass
+
+        if dst_eth in self.hosts:
+            # 目标主机已知
+            dst_dpid = self.hosts[dst_eth]['dpid']
+            dst_port = self.hosts[dst_eth]['port']
+
+            if dpid == dst_dpid:
+                # 同一台交换机，直接转发
+                out_port = dst_port
+            else:
+                # 不同交换机，计算路由
+                path = self.get_shortest_path(dpid, dst_dpid)
+                if path and len(path) > 1:
+                    # 路径的下一跳
+                    next_hop = path[1]
+                    out_port = self.graph[dpid][next_hop]
+                    self.logger.debug(f"[Routing] Path from {dpid} to {dst_dpid}: {path}, Out port: {out_port}")
+                else:
+                    self.logger.warning(f"[Routing] No path from {dpid} to {dst_dpid}, flooding")
+                    out_port = ofproto.OFPP_FLOOD
+        else:
+            # 目标主机未知，洪泛
+            out_port = ofproto.OFPP_FLOOD
+
+        # 3. 执行动作：下发流表 + 发送 PacketOut
+        actions = [parser.OFPActionOutput(out_port)]
+
+        # 如果不是洪泛，安装流表以避免下次 PacketIn
+        if out_port != ofproto.OFPP_FLOOD:
+            # 精确匹配目的 MAC 和入端口
+            match = parser.OFPMatch(in_port=in_port, eth_dst=dst_eth)
+
+            if msg.buffer_id != ofproto.OFP_NO_BUFFER:
+                self.add_flow(datapath, 1, match, actions, msg.buffer_id)
+                return  # 有 buffer_id 不需要再发 packet_out
+            else:
+                self.add_flow(datapath, 1, match, actions)
+
+        # 发送 PacketOut
+        data = None
+        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+            data = msg.data
+
+        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                  in_port=in_port, actions=actions, data=data)
+        datapath.send_msg(out)
+
     # ==================== 拓扑数据更新 ====================
     def update_topology(self):
         """调用 Ryu API 获取最新拓扑并更新 graph / links / topology_data /（适度更新 hosts）"""
@@ -87,12 +250,11 @@ class QoSController(app_manager.RyuApp):
             host_list = get_host(self)
 
         # 初始化邻接图
-        self.graph = {}
-        for s in switch_list:
-            self.graph[s.dp.id] = {}
+        self.graph = {s.dp.id: {} for s in switch_list}
+        self.inter_switch_ports = {s.dp.id: set() for s in switch_list}
+        links = []
 
         # 更新链路信息 + 构建双向图
-        links = []
         for l in link_list:
             src_dpid = l.src.dpid
             src_port = l.src.port_no
@@ -108,6 +270,13 @@ class QoSController(app_manager.RyuApp):
                 self.graph[src_dpid][dst_dpid] = src_port
             if dst_dpid in self.graph:
                 self.graph[dst_dpid][src_dpid] = dst_port
+
+            # --- 新增：标记这些端口为级联端口 ---
+            if src_dpid in self.inter_switch_ports:
+                self.inter_switch_ports[src_dpid].add(src_port)
+            if dst_dpid in self.inter_switch_ports:
+                self.inter_switch_ports[dst_dpid].add(dst_port)
+
         self.links = links
 
         # 更新主机信息（拓扑发现作为补充：不用 None 覆盖已有 IP）
@@ -152,6 +321,59 @@ class QoSController(app_manager.RyuApp):
         self.logger.debug(
             f"Topology updated: {len(switches_info)} switches, {len(self.links)} links, {len(topo_hosts)} hosts"
         )
+
+    # ==================== 辅助方法：流表操作 ====================
+    def add_flow(self, datapath, priority, match, actions, buffer_id=None):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+                                             actions)]
+        if buffer_id:
+            mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
+                                    priority=priority, match=match,
+                                    instructions=inst)
+        else:
+            mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
+                                    match=match, instructions=inst)
+        datapath.send_msg(mod)
+
+    # ==================== 辅助方法：最短路径计算 (BFS) ====================
+    def get_shortest_path(self, src, dst):
+        """计算 src dpid 到 dst dpid 的最短路径"""
+        if src == dst:
+            return [src]
+
+        # 简单的 BFS 实现
+        visited = {}
+        queue = []
+        parent = {}
+
+        for dpid in self.graph.keys():
+            visited[dpid] = False
+            parent[dpid] = None
+
+        visited[src] = True
+        queue.append(src)
+
+        while queue:
+            current = queue.pop(0)
+            if current == dst:
+                path = []
+                while current is not None:
+                    path.insert(0, current)
+                    current = parent[current]
+                return path
+
+            if current not in self.graph:
+                continue
+
+            for neighbor in self.graph[current]:
+                if not visited.get(neighbor, False):
+                    visited[neighbor] = True
+                    parent[neighbor] = current
+                    queue.append(neighbor)
+        return None
 
 
 # ===================== Web 服务控制器 =====================
