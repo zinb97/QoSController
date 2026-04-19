@@ -440,6 +440,27 @@
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">Show Bandwidth</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="showBandwidth">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">Show Delay</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="showDelay">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">Show Loss Rate</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="showLoss">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
             </div>
 
             <div class="sidebar-section">
@@ -474,7 +495,11 @@
         var edges = new vis.DataSet();
         let lastTopology = "";
         let showHosts = true;
+        let showBandwidth = false;
+        let showDelay = false;
+        let showLoss = false;
         let currentHosts = [];
+        let currentLinks = [];
 
         // 层级颜色映射
         const levelColors = {
@@ -518,6 +543,21 @@
             document.getElementById('showHosts').addEventListener('change', function(e) {
                 showHosts = e.target.checked;
                 updateHostVisibility();
+            });
+
+            document.getElementById('showBandwidth').addEventListener('change', function(e) {
+                showBandwidth = e.target.checked;
+                updateLinkLabels();
+            });
+
+            document.getElementById('showDelay').addEventListener('change', function(e) {
+                showDelay = e.target.checked;
+                updateLinkLabels();
+            });
+
+            document.getElementById('showLoss').addEventListener('change', function(e) {
+                showLoss = e.target.checked;
+                updateLinkLabels();
             });
         }
 
@@ -590,6 +630,41 @@
             });
         }
 
+        function buildLinkLabel(link) {
+            let parts = [];
+            if (showBandwidth && link.bw) parts.push(link.bw + ' Mbps');
+            if (showDelay && link.delay) parts.push(link.delay + ' ms');
+            if (showLoss && link.loss !== undefined) parts.push(link.loss + '%');
+            return parts.length > 0 ? parts.join(' | ') : '';
+        }
+
+        function updateLinkLabels() {
+            currentLinks.forEach((link, idx) => {
+                var edgeId = 'link_' + idx;
+                var label = buildLinkLabel(link);
+                var edge = edges.get(edgeId);
+                if (!edge) return;
+
+                if (label) {
+                    edges.update({
+                        id: edgeId,
+                        from: edge.from,
+                        to: edge.to,
+                        label: label,
+                        font: { face: 'JetBrains Mono', size: 10, color: '#8b949e', strokeWidth: 2, strokeColor: '#161b22' }
+                    });
+                } else {
+                    // Remove and re-add without label to clear all properties
+                    edges.remove(edgeId);
+                    edges.add({
+                        id: edgeId,
+                        from: edge.from,
+                        to: edge.to
+                    });
+                }
+            });
+        }
+
         function renderTopology(topo) {
             // Store current positions
             var positions = network.getPositions();
@@ -609,8 +684,19 @@
             });
 
             // Add links between switches
+            currentLinks = topo.links;
             topo.links.forEach((link, idx) => {
-                edges.add({ id: 'link_' + idx, from: link.src.dpid, to: link.dst.dpid });
+                var edgeData = {
+                    id: 'link_' + idx,
+                    from: link.src.dpid,
+                    to: link.dst.dpid
+                };
+                var label = buildLinkLabel(link);
+                if (label) {
+                    edgeData.label = label;
+                    edgeData.font = { face: 'JetBrains Mono', size: 10, color: '#8b949e', strokeWidth: 2, strokeColor: '#161b22' };
+                }
+                edges.add(edgeData);
             });
 
             // Add hosts
