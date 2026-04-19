@@ -12,6 +12,8 @@ import json
 import os
 from webob import Response
 
+import utils
+
 topology_api_name = 'topology_api'
 
 
@@ -35,6 +37,9 @@ class QoSController(app_manager.RyuApp):
         self.links = []
         self.graph = {}
         self.topology_data = {"switches": [], "links": [], "hosts": []}
+
+        self.switch_name = utils.get_switch_name()
+        print(self.switch_name)
 
         # 注册 Web API
         wsgi = kwargs['wsgi']
@@ -470,7 +475,8 @@ class QoSController(app_manager.RyuApp):
         for s in switch_list:
             dpid_hex = format(s.dp.id, '016x')
             level = int(dpid_hex[8:10], 16) if len(dpid_hex) >= 10 else 3
-            switches_info.append({'dpid': s.dp.id, 'level': level, 'ports': [p.port_no for p in s.ports]})
+            sw_name = self.switch_name.get(f'{s.dp.id:016x}', f"sw-{s.dp.id}")
+            switches_info.append({'dpid': s.dp.id, 'name': sw_name, 'level': level, 'ports': [p.port_no for p in s.ports]})
 
         self.topology_data = {'switches': switches_info, 'links': self.links, 'hosts': topo_hosts}
         self.logger.debug(f"Topology updated: {len(switches_info)} switches, {len(self.links)} links, {len(topo_hosts)} hosts")

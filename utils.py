@@ -97,3 +97,4 @@ def get_switch_name():
 
 if __name__ == '__main__':
     print(get_tc_stats_optimized('N1-eth1'))
+    print(get_switch_name())

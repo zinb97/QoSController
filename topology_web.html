@@ -350,7 +350,7 @@
         <div class="status-bar">
             <div class="status-item">
                 <div class="status-dot"></div>
-                <span>RYU Controller Connected</span>
+                <span>Controller Connected</span>
             </div>
         </div>
     </header>
@@ -551,7 +551,7 @@
                 <div class="switch-item">
                     <div class="switch-icon" style="background:${levelColor.bg}">⬡</div>
                     <div class="switch-info">
-                        <div class="switch-name">Switch ${s.dpid} (L${s.level})</div>
+                        <div class="switch-name">Switch ${s.name} (L${s.level})</div>
                         <div class="switch-dpid">DPID: 0x${s.dpid.toString(16).padStart(16, '0')}</div>
                     </div>
                 </div>
@@ -602,7 +602,7 @@
                 const colors = getSwitchColor(s.level);
                 nodes.add({
                     id: s.dpid,
-                    label: 'Switch ' + s.dpid + ' (L' + s.level + ')',
+                    label: s.name,
                     color: colors,
                     shadow: { enabled: true, color: colors.shadow || 'rgba(0,0,0,0.2)', size: 8, x: 0, y: 4 }
                 });
