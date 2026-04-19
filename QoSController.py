@@ -438,7 +438,9 @@ class QoSController(app_manager.RyuApp):
             dst_dpid = l.dst.dpid
             dst_port = l.dst.port_no
 
-            links.append({'src': {'dpid': src_dpid, 'port': src_port}, 'dst': {'dpid': dst_dpid, 'port': dst_port}})
+            eth_name = f'{self.switch_name.get(f"{src_dpid:016x}")}-eth{src_port}'
+            bw, delay, loss = utils.get_tc_stats_optimized(eth_name)
+            links.append({'src': {'dpid': src_dpid, 'port': src_port}, 'dst': {'dpid': dst_dpid, 'port': dst_port}, 'bw': bw, 'delay': delay, 'loss': loss})
 
             if src_dpid in self.graph:
                 self.graph[src_dpid][dst_dpid] = src_port
