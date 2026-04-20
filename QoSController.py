@@ -10,6 +10,7 @@ from ryu.lib.packet import packet, ethernet, arp, ipv4, icmp, tcp, udp, ipv6
 
 import json
 import os
+import time
 from webob import Response
 
 import utils
@@ -38,14 +39,18 @@ class QoSController(app_manager.RyuApp):
         self.graph = {}
         self.topology_data = {"switches": [], "links": [], "hosts": []}
 
+        # 端口统计（用于计算链路负载）
+        self.port_stats = {}            # {dpid: {port_no: {'rx_bytes': ..., 'tx_bytes': ..., 'timestamp': ...}}}
+        self.port_stats_prev = {}       # {dpid: {port_no: {'rx_bytes': ..., 'tx_bytes': ..., 'timestamp': ...}}}
+
         self.switch_name = utils.get_switch_name()
-        print(self.switch_name)
 
         # 注册 Web API
         wsgi = kwargs['wsgi']
         wsgi.register(TopologyController, {topology_api_name: self})
 
         self._topo_thread = hub.spawn(self._topology_loop)
+        self._stats_thread = hub.spawn(self._stats_loop)
 
     def _topology_loop(self):
         while True:
@@ -54,6 +59,68 @@ class QoSController(app_manager.RyuApp):
             except Exception as e:
                 self.logger.warning(f"Topology loop update failed: {e}")
             hub.sleep(3)
+
+    def _stats_loop(self):
+        """定期请求交换机端口统计信息"""
+        while True:
+            try:
+                self._request_port_stats()
+            except Exception as e:
+                self.logger.warning(f"Port stats request failed: {e}")
+            hub.sleep(2)
+
+    def _request_port_stats(self):
+        """向所有交换机发送端口统计请求"""
+        for dpid, datapath in self.datapaths.items():
+            ofproto = datapath.ofproto
+            parser = datapath.ofproto_parser
+            req = parser.OFPPortStatsRequest(datapath, port_no=ofproto.OFPP_ANY)
+            datapath.send_msg(req)
+
+    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
+    def _port_stats_reply_handler(self, ev):
+        """处理端口统计应答，计算链路负载"""
+        msg = ev.msg
+        dpid = msg.datapath.id
+        now = time.time()
+
+        # 保存当前统计
+        self.port_stats[dpid] = {}
+
+        for stat in msg.body:
+            port_no = stat.port_no
+            # 跳过特殊端口
+            if port_no > ofproto_v1_3.OFPP_MAX:
+                continue
+
+            self.port_stats[dpid][port_no] = {
+                'rx_bytes': stat.rx_bytes,
+                'tx_bytes': stat.tx_bytes,
+                'rx_packets': stat.rx_packets,
+                'tx_packets': stat.tx_packets,
+                'rx_errors': stat.rx_errors,
+                'tx_errors': stat.tx_errors,
+                'timestamp': now
+            }
+
+            # 计算与上次的差值和负载
+            if dpid in self.port_stats_prev and port_no in self.port_stats_prev[dpid]:
+                prev = self.port_stats_prev[dpid][port_no]
+                time_delta = now - prev['timestamp']
+                if time_delta > 0:
+                    rx_bytes_delta = stat.rx_bytes - prev['rx_bytes']
+                    tx_bytes_delta = stat.tx_bytes - prev['tx_bytes']
+
+                    # 计算负载 (Mbps)
+                    rx_bps = (rx_bytes_delta * 8) / time_delta / 1_000_000
+                    tx_bps = (tx_bytes_delta * 8) / time_delta / 1_000_000
+
+                    self.port_stats[dpid][port_no]['rx_bps'] = round(rx_bps, 2)
+                    self.port_stats[dpid][port_no]['tx_bps'] = round(tx_bps, 2)
+                    self.port_stats[dpid][port_no]['total_bps'] = round(rx_bps + tx_bps, 2)
+
+        # 保存本次统计作为下一次的前一个
+        self.port_stats_prev[dpid] = self.port_stats[dpid]
 
     # ==================== 拓扑事件回调 ====================
     @set_ev_cls(event.EventSwitchEnter)
@@ -440,7 +507,29 @@ class QoSController(app_manager.RyuApp):
 
             eth_name = f'{self.switch_name.get(f"{src_dpid:016x}")}-eth{src_port}'
             bw, delay, loss = utils.get_tc_stats_optimized(eth_name)
-            links.append({'src': {'dpid': src_dpid, 'port': src_port}, 'dst': {'dpid': dst_dpid, 'port': dst_port}, 'bw': bw, 'delay': delay, 'loss': loss})
+
+            # 获取链路负载（从端口统计计算）
+            rx_bps = 0
+            tx_bps = 0
+            total_bps = 0
+            if src_dpid in self.port_stats and src_port in self.port_stats[src_dpid]:
+                rx_bps = self.port_stats[src_dpid][src_port].get('rx_bps', 0)
+                tx_bps = self.port_stats[src_dpid][src_port].get('tx_bps', 0)
+                total_bps = self.port_stats[src_dpid][src_port].get('total_bps', 0)
+            elif dst_dpid in self.port_stats and dst_port in self.port_stats[dst_dpid]:
+                rx_bps = self.port_stats[dst_dpid][dst_port].get('rx_bps', 0)
+                tx_bps = self.port_stats[dst_dpid][dst_port].get('tx_bps', 0)
+                total_bps = self.port_stats[dst_dpid][dst_port].get('total_bps', 0)
+
+            if rx_bps > 10:
+                print(rx_bps, tx_bps, rx_bps + tx_bps)
+
+            links.append({
+                'src': {'dpid': src_dpid, 'port': src_port},
+                'dst': {'dpid': dst_dpid, 'port': dst_port},
+                'bw': bw, 'delay': delay, 'loss': loss,
+                'load': {'rx_bps': rx_bps, 'tx_bps': tx_bps, 'total_bps': total_bps}
+            })
 
             if src_dpid in self.graph:
                 self.graph[src_dpid][dst_dpid] = src_port

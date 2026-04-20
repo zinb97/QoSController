@@ -461,6 +461,13 @@
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">Show Load</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="showLoad">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
             </div>
 
             <div class="sidebar-section">
@@ -498,6 +505,7 @@
         let showBandwidth = false;
         let showDelay = false;
         let showLoss = false;
+        let showLoad = false;
         let currentHosts = [];
         let currentLinks = [];
 
@@ -557,6 +565,11 @@
 
             document.getElementById('showLoss').addEventListener('change', function(e) {
                 showLoss = e.target.checked;
+                updateLinkLabels();
+            });
+
+            document.getElementById('showLoad').addEventListener('change', function(e) {
+                showLoad = e.target.checked;
                 updateLinkLabels();
             });
         }
@@ -635,6 +648,12 @@
             if (showBandwidth && link.bw) parts.push(link.bw + ' Mbps');
             if (showDelay && link.delay) parts.push(link.delay + ' ms');
             if (showLoss && link.loss !== undefined) parts.push(link.loss + '%');
+            if (showLoad && link.load) {
+                const load = link.load;
+                if (load.total_bps !== undefined) {
+                    parts.push('↑' + load.tx_bps + ' Mbps');
+                }
+            }
             return parts.length > 0 ? parts.join(' | ') : '';
         }
 
