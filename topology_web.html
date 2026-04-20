@@ -528,6 +528,32 @@
             };
         }
 
+        function getLinkLoadColor(link) {
+            // 根据负载与带宽的比值计算颜色
+            // 0% = 绿色, 50% = 黄色, 100% = 红色
+            if (!link.load || !link.bw || link.bw === 0) {
+                return { color: '#58a6ff', highlight: '#79c0ff' }; // 默认蓝色
+            }
+            const ratio = link.load.total_bps / link.bw;
+            let r, g, b;
+            if (ratio < 0.5) {
+                // 绿色到黄色 (0% -> 50%)
+                const t = ratio * 2; // 0 -> 1
+                r = Math.round(88 * t);
+                g = 166;
+                b = Math.round(81 * (1 - t));
+            } else {
+                // 黄色到红色 (50% -> 100%)
+                const t = (ratio - 0.5) * 2; // 0 -> 1
+                r = 88 + Math.round((237 - 88) * t);
+                g = 166 - Math.round(166 * t);
+                b = Math.round(81 * t);
+            }
+            const color = `rgb(${r}, ${g}, ${b})`;
+            const highlight = `rgb(${Math.min(r + 30, 255)}, ${Math.min(g + 30, 255)}, ${Math.min(b + 30, 255)})`;
+            return { color, highlight };
+        }
+
         function initNetwork() {
             var container = document.getElementById('mynetwork');
             var data = { nodes: nodes, edges: edges };
@@ -672,21 +698,35 @@
                 if (!edge) return;
 
                 if (label) {
-                    edges.update({
+                    var updateData = {
                         id: edgeId,
                         from: edge.from,
                         to: edge.to,
                         label: label,
                         font: { face: 'JetBrains Mono', size: 10, color: '#8b949e', strokeWidth: 2, strokeColor: '#161b22' }
-                    });
+                    };
+                    // 如果显示负载，根据负载调整颜色
+                    if (showLoad) {
+                        var loadColor = getLinkLoadColor(link);
+                        updateData.color = loadColor;
+                        updateData.highlight = loadColor;
+                    }
+                    edges.update(updateData);
                 } else {
                     // Remove and re-add without label to clear all properties
                     edges.remove(edgeId);
-                    edges.add({
+                    var newEdge = {
                         id: edgeId,
                         from: edge.from,
                         to: edge.to
-                    });
+                    };
+                    // 如果显示负载，根据负载调整颜色
+                    if (showLoad) {
+                        var loadColor = getLinkLoadColor(link);
+                        newEdge.color = loadColor;
+                        newEdge.highlight = loadColor;
+                    }
+                    edges.add(newEdge);
                 }
             });
         }
@@ -721,6 +761,12 @@
                 if (label) {
                     edgeData.label = label;
                     edgeData.font = { face: 'JetBrains Mono', size: 10, color: '#8b949e', strokeWidth: 2, strokeColor: '#161b22' };
+                }
+                // 如果显示负载，根据负载调整颜色
+                if (showLoad) {
+                    var loadColor = getLinkLoadColor(link);
+                    edgeData.color = loadColor;
+                    edgeData.highlight = loadColor;
                 }
                 edges.add(edgeData);
             });
