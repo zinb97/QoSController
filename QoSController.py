@@ -11,6 +11,7 @@ from ryu.lib.packet import packet, ethernet, arp, ipv4, icmp, tcp, udp, ipv6
 import json
 import os
 import time
+import networkx as nx
 from webob import Response
 
 import utils
@@ -34,9 +35,8 @@ class QoSController(app_manager.RyuApp):
         self.inter_switch_ports = {}    # {dpid: set(port_no, ...)}
         self.datapaths = {}             # 保存所有交换机
 
-        # 拓扑相关
-        self.links = []
-        self.graph = {}
+        # 拓扑相关 - 使用 networkx DiGraph
+        self.graph = nx.DiGraph()        # 保存完整拓扑（节点=交换机，边=链路）
         self.topology_data = {"switches": [], "links": [], "hosts": []}
 
         # 端口统计（用于计算链路负载）
@@ -257,11 +257,9 @@ class QoSController(app_manager.RyuApp):
             actions = [parser.OFPActionOutput(out_port)]
         else:
             # 跨交换机最短路径
-            path = self.get_shortest_path(dpid, dst_dpid)
-            if not path or len(path) <= 1:
+            out_port = self.get_path_out_port(dpid, dst_dpid)
+            if not out_port:
                 return
-            next_hop = path[1]
-            out_port = self.graph[dpid][next_hop]
             actions = [parser.OFPActionOutput(out_port)]
 
         # 下发流表
@@ -436,10 +434,11 @@ class QoSController(app_manager.RyuApp):
 
             inter_ports = self.inter_switch_ports.get(dpid, set())
             flood_ports = []
-            for sw in self.topology_data['switches']:
-                if sw['dpid'] == dpid:
-                    flood_ports = [p for p in sw['ports'] if p not in inter_ports]
-                    break
+
+            # 从 graph 获取交换机端口信息
+            if dpid in self.graph:
+                sw_ports = self.graph.nodes[dpid].get('ports', [])
+                flood_ports = [p for p in sw_ports if p not in inter_ports]
 
             if not flood_ports:
                 continue
@@ -493,12 +492,19 @@ class QoSController(app_manager.RyuApp):
             link_list = get_link(self)
             host_list = get_host(self)
 
-        # 初始化拓扑结构
-        self.graph = {s.dp.id: {} for s in switch_list}
+        # 重建 DiGraph
+        self.graph = nx.DiGraph()
         self.inter_switch_ports = {s.dp.id: set() for s in switch_list}
-        links = []
 
-        # 构建链路与级联端口
+        # 添加交换机节点
+        for s in switch_list:
+            dpid_hex = format(s.dp.id, '016x')
+            level = int(dpid_hex[8:10], 16) if len(dpid_hex) >= 10 else 3
+            sw_name = self.switch_name.get(f'{s.dp.id:016x}', f"sw-{s.dp.id}")
+            ports = [p.port_no for p in s.ports]
+            self.graph.add_node(s.dp.id, name=sw_name, level=level, ports=ports)
+
+        # 添加链路边
         for l in link_list:
             src_dpid = l.src.dpid
             src_port = l.src.port_no
@@ -521,30 +527,17 @@ class QoSController(app_manager.RyuApp):
                 tx_bps = self.port_stats[dst_dpid][dst_port].get('tx_bps', 0)
                 total_bps = self.port_stats[dst_dpid][dst_port].get('total_bps', 0)
 
-            if rx_bps > 10:
-                print(rx_bps, tx_bps, rx_bps + tx_bps)
+            # 添加双向边（保存端口和链路状态信息）
+            self.graph.add_edge(src_dpid, dst_dpid,
+                               src_port=src_port, dst_port=dst_port,
+                               bw=bw, delay=delay, loss=loss,
+                               rx_bps=rx_bps, tx_bps=tx_bps, total_bps=total_bps)
 
-            links.append({
-                'src': {'dpid': src_dpid, 'port': src_port},
-                'dst': {'dpid': dst_dpid, 'port': dst_port},
-                'bw': bw, 'delay': delay, 'loss': loss,
-                'load': {'rx_bps': rx_bps, 'tx_bps': tx_bps, 'total_bps': total_bps}
-            })
-
-            if src_dpid in self.graph:
-                self.graph[src_dpid][dst_dpid] = src_port
-            if dst_dpid in self.graph:
-                self.graph[dst_dpid][src_dpid] = dst_port
-
-            if src_dpid in self.inter_switch_ports:
-                self.inter_switch_ports[src_dpid].add(src_port)
-            if dst_dpid in self.inter_switch_ports:
-                self.inter_switch_ports[dst_dpid].add(dst_port)
-
-        self.links = links
+            # 记录级联端口
+            self.inter_switch_ports[src_dpid].add(src_port)
+            self.inter_switch_ports[dst_dpid].add(dst_port)
 
         # 主机信息更新
-        topo_hosts = []
         for h in host_list:
             if not h.port:
                 continue
@@ -559,18 +552,49 @@ class QoSController(app_manager.RyuApp):
             else:
                 self.hosts[mac] = {'mac': mac, 'ip': ip, 'dpid': h.port.dpid, 'port': h.port.port_no}
 
-            topo_hosts.append({'mac': mac, 'ip': self.hosts[mac].get('ip'), 'dpid': self.hosts[mac]['dpid'], 'port': self.hosts[mac]['port']})
+        # 从 graph 提取 topology_data
+        self.topology_data = self._build_topology_data()
+        self.logger.debug(f"Topology updated: {self.graph.number_of_nodes()} switches, {self.graph.number_of_edges()} links")
 
+    def _build_topology_data(self):
+        """从 DiGraph 提取前端需要的拓扑数据"""
         # 交换机信息
-        switches_info = []
-        for s in switch_list:
-            dpid_hex = format(s.dp.id, '016x')
-            level = int(dpid_hex[8:10], 16) if len(dpid_hex) >= 10 else 3
-            sw_name = self.switch_name.get(f'{s.dp.id:016x}', f"sw-{s.dp.id}")
-            switches_info.append({'dpid': s.dp.id, 'name': sw_name, 'level': level, 'ports': [p.port_no for p in s.ports]})
+        switches = []
+        for dpid, attrs in self.graph.nodes(data=True):
+            switches.append({
+                'dpid': dpid,
+                'name': attrs.get('name', f'sw-{dpid}'),
+                'level': attrs.get('level', 3),
+                'ports': attrs.get('ports', [])
+            })
 
-        self.topology_data = {'switches': switches_info, 'links': self.links, 'hosts': topo_hosts}
-        self.logger.debug(f"Topology updated: {len(switches_info)} switches, {len(self.links)} links, {len(topo_hosts)} hosts")
+        # 链路信息
+        links = []
+        for src_dpid, dst_dpid, attrs in self.graph.edges(data=True):
+            links.append({
+                'src': {'dpid': src_dpid, 'port': attrs.get('src_port')},
+                'dst': {'dpid': dst_dpid, 'port': attrs.get('dst_port')},
+                'bw': attrs.get('bw', 0),
+                'delay': attrs.get('delay', 0),
+                'loss': attrs.get('loss', 0),
+                'load': {
+                    'rx_bps': attrs.get('rx_bps', 0),
+                    'tx_bps': attrs.get('tx_bps', 0),
+                    'total_bps': attrs.get('total_bps', 0)
+                }
+            })
+
+        # 主机信息
+        hosts = []
+        for mac, attrs in self.hosts.items():
+            hosts.append({
+                'mac': mac,
+                'ip': attrs.get('ip'),
+                'dpid': attrs['dpid'],
+                'port': attrs['port']
+            })
+
+        return {'switches': switches, 'links': links, 'hosts': hosts}
 
     # ==================== 流表下发 ====================
     def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=30, hard_timeout=0):
@@ -586,30 +610,28 @@ class QoSController(app_manager.RyuApp):
                                     match=match, instructions=inst, idle_timeout=idle_timeout, hard_timeout=hard_timeout)
         datapath.send_msg(mod)
 
-    # ==================== 最短路径 BFS ====================
+        # ==================== 最短路径（使用 networkx） ====================
     def get_shortest_path(self, src, dst):
+        """使用 networkx Dijkstra 算法计算最短路径"""
         if src == dst:
             return [src]
+        if src not in self.graph or dst not in self.graph:
+            return None
+        try:
+            path = nx.shortest_path(self.graph, src, dst)
+            return path
+        except nx.NetworkXNoPath:
+            return None
 
-        visited = {dpid: False for dpid in self.graph.keys()}
-        parent = {dpid: None for dpid in self.graph.keys()}
-        queue = [src]
-        visited[src] = True
-
-        while queue:
-            current = queue.pop(0)
-            if current == dst:
-                path = []
-                while current is not None:
-                    path.insert(0, current)
-                    current = parent[current]
-                return path
-
-            for neighbor in self.graph.get(current, {}):
-                if not visited[neighbor]:
-                    visited[neighbor] = True
-                    parent[neighbor] = current
-                    queue.append(neighbor)
+    def get_path_out_port(self, src, dst):
+        """获取最短路径上下一个交换机的出端口"""
+        path = self.get_shortest_path(src, dst)
+        if not path or len(path) <= 1:
+            return None
+        next_hop = path[1]
+        # 从 src 到 next_hop 的边的 src_port
+        if self.graph.has_edge(src, next_hop):
+            return self.graph[src][next_hop].get('src_port')
         return None
 
 
