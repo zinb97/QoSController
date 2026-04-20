@@ -586,6 +586,13 @@
             return true;
         }
 
+        function updateLinkDataOnly(topo) {
+            // Only update link load data without re-rendering topology
+            currentLinks = topo.links;
+            updateLinkLabels();
+            updateTime();
+        }
+
         function updateTime() {
             const now = new Date();
             document.getElementById('lastUpdate').textContent = now.toLocaleTimeString('zh-CN', { hour12: false });
@@ -745,7 +752,11 @@
                 let res = await fetch('/topology/data');
                 let topo = await res.json();
 
-                if (!hasTopologyChanged(topo)) return;
+                if (!hasTopologyChanged(topo)) {
+                    // Topology unchanged, just update link load data
+                    updateLinkDataOnly(topo);
+                    return;
+                }
 
                 renderTopology(topo);
                 updateSidebar(topo);
