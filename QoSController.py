@@ -244,6 +244,7 @@ class QoSController(app_manager.RyuApp):
         """
         ofproto, parser = datapath.ofproto, datapath.ofproto_parser
         dpid = datapath.id
+        sw_name = self.switch_name.get(f'{dpid:016x}', f"{dpid}")
         dst_eth, src_eth = eth.dst, eth.src
         src_ip, dst_ip = ipv4_pkt.src, ipv4_pkt.dst
         proto = ipv4_pkt.proto
@@ -261,21 +262,21 @@ class QoSController(app_manager.RyuApp):
         if tcp_pkt:
             src_port = tcp_pkt.src_port
             dst_port = tcp_pkt.dst_port
-            self.logger.info(f"[PacketIn] SW:{dpid} TCP {src_ip}:{src_port}-->{dst_ip}:{dst_port} {dscp if dscp else ''}")
+            self.logger.info(f"[PacketIn] SW:{sw_name} TCP {src_ip}:{src_port}-->{dst_ip}:{dst_port} {dscp if dscp else ''}")
         elif udp_pkt:
             src_port = udp_pkt.src_port
             dst_port = udp_pkt.dst_port
-            self.logger.info(f"[PacketIn] SW:{dpid} UDP {src_ip}:{src_port}-->{dst_ip}:{dst_port} {dscp if dscp else ''}")
+            self.logger.info(f"[PacketIn] SW:{sw_name} UDP {src_ip}:{src_port}-->{dst_ip}:{dst_port} {dscp if dscp else ''}")
         elif icmp_pkt:
             icmp_type = icmp_pkt.type
             if icmp_type == icmp.ICMP_ECHO_REQUEST:
-                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Request {src_ip}-->{dst_ip} {dscp if dscp else ''}")
+                self.logger.info(f"[PacketIn] SW:{sw_name} ICMP Echo Request {src_ip}-->{dst_ip} {dscp if dscp else ''}")
             elif icmp_type == icmp.ICMP_ECHO_REPLY:
-                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Reply {src_ip}-->{dst_ip} {dscp if dscp else ''}")
+                self.logger.info(f"[PacketIn] SW:{sw_name} ICMP Echo Reply {src_ip}-->{dst_ip} {dscp if dscp else ''}")
             else:
-                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Type:{icmp_type} {src_ip}-->{dst_ip} {dscp if dscp else ''}")
+                self.logger.info(f"[PacketIn] SW:{sw_name} ICMP Type:{icmp_type} {src_ip}-->{dst_ip} {dscp if dscp else ''}")
         else:
-            self.logger.info(f"[PacketIn] SW:{dpid} proto:{str(proto)} {src_ip}-->{dst_ip} {dscp if dscp else ''}")
+            self.logger.info(f"[PacketIn] SW:{sw_name} proto:{str(proto)} {src_ip}-->{dst_ip} {dscp if dscp else ''}")
 
         # 流表匹配规则
         if dscp:
@@ -286,7 +287,7 @@ class QoSController(app_manager.RyuApp):
         if dst_ip in self.ip_to_mac:
             dst_eth = self.ip_to_mac[dst_ip]
         else:
-            self.logger.info(f"[PacketIn] SW:{dpid} {dst_ip} not in ip_to_mac")
+            self.logger.info(f"[PacketIn] SW:{sw_name} {dst_ip} not in ip_to_mac")
 
         # 路由与转发决策
         if dst_eth not in self.hosts:
@@ -297,29 +298,84 @@ class QoSController(app_manager.RyuApp):
 
         dst_dpid = self.hosts[dst_eth]['dpid']
         dst_port = self.hosts[dst_eth]['port']
+        src_dpid = self.hosts[src_eth]['dpid']
+        src_port = self.hosts[src_eth]['port']
 
         # 同交换机直接转发
         if dpid == dst_dpid:
             out_port = dst_port
             actions = [parser.OFPActionOutput(out_port)]
-        else:
-            # 跨交换机最短路径（根据 DSCP 选择路由策略）
-            out_port = self.get_path_out_port(dpid, dst_dpid, dscp)
-            if not out_port:
-                return
-            actions = [parser.OFPActionOutput(out_port)]
+            # 下发流表
+            if flow_match:
+                self.add_flow(datapath, 101, flow_match, actions)
+            # 发送当前报文
+            data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
+            out = parser.OFPPacketOut(
+                datapath=datapath, buffer_id=msg.buffer_id,
+                in_port=in_port, actions=actions, data=data
+            )
+            datapath.send_msg(out)
+            return
 
-        # 下发流表
-        if out_port != ofproto.OFPP_FLOOD and flow_match:
-            buffer_id = msg.buffer_id if msg.buffer_id != ofproto.OFP_NO_BUFFER else None
-            priority = 1 if dscp > 0 else 101
-            self.add_flow(datapath, priority, flow_match, actions, buffer_id)
+        # 跨交换机：计算完整路径并下发双向流表
+        path = self.get_shortest_path(dpid, dst_dpid, dscp)
+        if not path or len(path) < 2:
+            self.logger.warning(f"[Route] No path found from {dpid} to {dst_dpid}")
+            return
+
+        self.logger.info(f"[Route] Path: {' -> '.join(self.switch_name.get(f'{p:016x}', f'{p}') for p in path)}")
+
+        # 构建路径上每个交换机的转发信息
+        path_switches = []
+        # 源交换机
+        path_switches.append({
+            'dpid': src_dpid,
+            'in_port': src_port,
+            'out_port': self.graph[path[0]][path[1]].get("src_port"),
+        })
+        # 中间交换机
+        for i in range(1, len(path) - 1):
+            pre_sw = path[i - 1]
+            curr_sw = path[i]
+            next_sw = path[i + 1]
+            in_edge = self.graph[pre_sw][curr_sw]
+            out_edge = self.graph[curr_sw][next_sw]
+            path_switches.append({
+                'dpid': curr_sw,
+                'in_port': in_edge.get("dst_port"),
+                'out_port': out_edge.get("src_port"),
+            })
+        # 目的交换机
+        path_switches.append({
+            'dpid': dst_dpid,
+            'in_port': self.graph[path[-2]][path[-1]].get("dst_port"),
+            'out_port': dst_port,
+        })
+
+        # 下发正向流表 (ipv4_dst)
+        for ps in path_switches:
+            sw_dp = self.datapaths.get(ps['dpid'])
+            if sw_dp:
+                match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
+                actions = [parser.OFPActionOutput(ps['out_port'])]
+                self.add_flow(sw_dp, 101, match, actions)
+                self.logger.info(f"[Flow] {self.sw_name(ps['dpid'])}: {ps['in_port']} -> {ps['out_port']} (dst={dst_ip})")
+
+        # 下发反向流表 (ipv4_src)
+        for ps in path_switches:
+            sw_dp = self.datapaths.get(ps['dpid'])
+            if sw_dp:
+                match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=src_ip)
+                actions = [parser.OFPActionOutput(ps['in_port'])]
+                self.add_flow(sw_dp, 101, match, actions)
+                self.logger.info(f"[Flow] {self.sw_name(ps['dpid'])}: {ps['out_port']} -> {ps['in_port']} (dst={src_ip})")
 
         # 发送当前报文
+        out_port = path_switches[0]['out_port']
         data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
         out = parser.OFPPacketOut(
             datapath=datapath, buffer_id=msg.buffer_id,
-            in_port=in_port, actions=actions, data=data
+            in_port=in_port, actions=[parser.OFPActionOutput(out_port)], data=data
         )
         datapath.send_msg(out)
 
@@ -592,7 +648,7 @@ class QoSController(app_manager.RyuApp):
         return {'switches': switches, 'links': links, 'hosts': hosts}
 
     # ==================== 流表下发 ====================
-    def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=30, hard_timeout=0):
+    def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=120, hard_timeout=0):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
@@ -654,6 +710,9 @@ class QoSController(app_manager.RyuApp):
             parser = datapath.ofproto_parser
             req = parser.OFPPortStatsRequest(datapath, port_no=ofproto.OFPP_ANY)
             datapath.send_msg(req)
+
+    def sw_name(self, dpid):
+        return f'{self.switch_name.get(f"{dpid:016x}", dpid)}'
 
 
 # ===================== Web 服务 =====================
