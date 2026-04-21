@@ -408,38 +408,39 @@ class QoSController(app_manager.RyuApp):
 
                     # 收集该节点需要转发到的所有下一跳
                     out_actions = []
+
+                    # 如果该交换机上有组成员主机，转发到主机端口（目的交换机）
                     if src_node_dpid in member_dpid_set:
-                        # 目的交换机，转发到主机端口
-                        for mac, (member_ip, member_port) in self.multicast_groups[dst_ip].get(src_node_dpid,{}).items():
+                        for mac, (member_ip, member_port) in self.multicast_groups[dst_ip].get(src_node_dpid, {}).items():
                             out_actions.append(src_parser.OFPActionOutput(member_port))
                             self.logger.info(f"[Multicast Flow] SW:{src_node_dpid} -> host port {member_port}")
-                    else:
-                        # 源交换机或中间交换机
-                        for j in range(netsize):
-                            if route_matrix[i][j] == 1:
-                                dst_node_dpid = self.adj_matrix_nodes[j]
 
-                                # 转发到下一跳交换机端口
-                                out_port = self.get_path_out_port(src_node_dpid, dst_node_dpid)
-                                if out_port:
-                                    out_actions.append(src_parser.OFPActionOutput(out_port))
-                                    self.logger.info(f"[Multicast Flow] SW:{src_node_dpid} -> port {out_port} (next hop SW:{dst_node_dpid})")
+                    # 遍历 route_matrix[i][j] == 1，转发到下一跳交换机（源/中间交换机）
+                    for j in range(netsize):
+                        if route_matrix[i][j] == 1:
+                            dst_node_dpid = self.adj_matrix_nodes[j]
+                            out_port = self.get_path_out_port(src_node_dpid, dst_node_dpid)
+                            if out_port:
+                                out_actions.append(src_parser.OFPActionOutput(out_port))
+                                self.logger.info(f"[Multicast Flow] SW:{src_node_dpid} -> port {out_port} (next hop SW:{dst_node_dpid})")
 
                     if out_actions:
-                        # todo：源交换机需要匹配 in_port + src_ip + 组播地址，其他交换机只匹配 src_ip + 组播地址
+                        # 源交换机需要匹配 in_port + src_ip + 组播地址，其他交换机只匹配 src_ip + 组播地址
                         if src_node_dpid == src_switch_dpid:
                             match = src_parser.OFPMatch(
                                 in_port=in_port,
                                 eth_type=0x0800,
+                                ipv4_src=src_ip,
                                 ipv4_dst=dst_ip
                             )
                         else:
                             match = src_parser.OFPMatch(
                                 eth_type=0x0800,
+                                ipv4_src=src_ip,
                                 ipv4_dst=dst_ip
                             )
                         self.add_flow(src_datapath, 100, match, out_actions, idle_timeout=300, hard_timeout=0)
-                        installed_flows.append((src_node_dpid, f"ipv4_dst={dst_ip} -> {len(out_actions)} port(s)"))
+                        installed_flows.append((src_node_dpid, f"ipv4_src={src_ip}, ipv4_dst={dst_ip} -> {len(out_actions)} port(s)"))
 
                 # 记录已安装的流规则
                 if dst_ip not in self.multicast_flows:
