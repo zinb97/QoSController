@@ -300,10 +300,40 @@ class QoSController(app_manager.RyuApp):
         )
         datapath.send_msg(out)
 
+    def _delete_multicast_flows(self, multicast_addr):
+        """
+        删除指定组播组的所有流表规则
+        """
+        if multicast_addr not in self.multicast_flows or not self.multicast_flows[multicast_addr]:
+            return
+
+        for dpid, match_desc in self.multicast_flows[multicast_addr]:
+            if dpid not in self.datapaths:
+                continue
+            datapath = self.datapaths[dpid]
+            ofproto = datapath.ofproto
+            parser = datapath.ofproto_parser
+
+            # 构造匹配 ipv4_dst 的 match
+            match = parser.OFPMatch(eth_type=0x0800, ipv4_dst=multicast_addr)
+            # 删除该组播组的流表
+            mod = parser.OFPFlowMod(
+                datapath=datapath,
+                command=ofproto.OFPFC_DELETE,
+                out_port=ofproto.OFPP_ANY,
+                out_group=ofproto.OFPG_ANY,
+                match=match
+            )
+            datapath.send_msg(mod)
+            self.logger.info(f"[Multicast Flow] Deleted flow on SW:{dpid} for group {multicast_addr}")
+
+        # 清空该组播组的流表记录
+        self.multicast_flows[multicast_addr] = []
+
     # ==================== IGMP 处理 ====================
     def handle_igmp(self, datapath, in_port, eth, ipv4_pkt, igmp_pkt):
         """
-        处理 IGMP 报文（加入/离开组播组）
+        处理 IGMP 报文（加入/离开组播组），如果某组播组已安装流表，同时有组播成员加入/离开，则删除该组播组安装的所有流表
         """
         dpid = datapath.id
         src_ip = ipv4_pkt.src
@@ -320,6 +350,11 @@ class QoSController(app_manager.RyuApp):
         type_name = igmp_type_names.get(msgtype, "Unknown")
 
         self.logger.info(f"[IGMP] SW:{dpid} IGMP {type_name} from {src_ip} for group {multicast_addr}")
+
+        # 检查该组播组是否已安装过流表
+        if multicast_addr in self.multicast_flows and self.multicast_flows[multicast_addr]:
+            self.logger.info(f"[IGMP] Group {multicast_addr} has existing flow rules, deleting them first")
+            self._delete_multicast_flows(multicast_addr)
 
         # msgtype 0x12/0x16 = Join (加入组播组)
         if msgtype in [0x12, 0x16]:
