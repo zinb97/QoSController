@@ -69,13 +69,34 @@ class QoSController(app_manager.RyuApp):
                 self.logger.warning(f"Port stats request failed: {e}")
             hub.sleep(2)
 
-    def _request_port_stats(self):
-        """向所有交换机发送端口统计请求"""
-        for dpid, datapath in self.datapaths.items():
-            ofproto = datapath.ofproto
-            parser = datapath.ofproto_parser
-            req = parser.OFPPortStatsRequest(datapath, port_no=ofproto.OFPP_ANY)
-            datapath.send_msg(req)
+    # ==================== 拓扑事件回调 ====================
+    @set_ev_cls(event.EventSwitchEnter)
+    def switch_enter_handler(self, ev):
+        self.logger.info(f"交换机上线: DPID={ev.switch.dp.id}")
+        self.datapaths[ev.switch.dp.id] = ev.switch.dp
+        self.update_topology()
+
+    @set_ev_cls(event.EventSwitchLeave)
+    def switch_leave_handler(self, ev):
+        dpid = ev.switch.dp.id
+        self.logger.info(f"交换机离线: DPID={dpid}")
+        self.datapaths.pop(dpid, None)
+        self.update_topology()
+
+    @set_ev_cls(event.EventLinkAdd)
+    def link_add_handler(self, ev):
+        self.logger.info(f"新增链路: {ev.link.src.dpid}:{ev.link.src.port_no} <-> {ev.link.dst.dpid}:{ev.link.dst.port_no}")
+        self.update_topology()
+
+    @set_ev_cls(event.EventLinkDelete)
+    def link_delete_handler(self, ev):
+        self.logger.info(f"删除链路: {ev.link.src.dpid}:{ev.link.src.port_no} <-> {ev.link.dst.dpid}:{ev.link.dst.port_no}")
+        self.update_topology()
+
+    @set_ev_cls(event.EventHostAdd)
+    def host_add_handler(self, ev):
+        self.logger.info(f"主机加入: MAC={ev.host.mac}, IP={ev.host.ipv4}, Switch={ev.host.port.dpid}:{ev.host.port.port_no}")
+        self.update_topology()
 
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
@@ -122,38 +143,9 @@ class QoSController(app_manager.RyuApp):
         # 保存本次统计作为下一次的前一个
         self.port_stats_prev[dpid] = self.port_stats[dpid]
 
-    # ==================== 拓扑事件回调 ====================
-    @set_ev_cls(event.EventSwitchEnter)
-    def switch_enter_handler(self, ev):
-        self.logger.info(f"交换机上线: DPID={ev.switch.dp.id}")
-        self.datapaths[ev.switch.dp.id] = ev.switch.dp
-        self.update_topology()
-
-    @set_ev_cls(event.EventSwitchLeave)
-    def switch_leave_handler(self, ev):
-        dpid = ev.switch.dp.id
-        self.logger.info(f"交换机离线: DPID={dpid}")
-        self.datapaths.pop(dpid, None)
-        self.update_topology()
-
-    @set_ev_cls(event.EventLinkAdd)
-    def link_add_handler(self, ev):
-        self.logger.info(f"新增链路: {ev.link.src.dpid}:{ev.link.src.port_no} <-> {ev.link.dst.dpid}:{ev.link.dst.port_no}")
-        self.update_topology()
-
-    @set_ev_cls(event.EventLinkDelete)
-    def link_delete_handler(self, ev):
-        self.logger.info(f"删除链路: {ev.link.src.dpid}:{ev.link.src.port_no} <-> {ev.link.dst.dpid}:{ev.link.dst.port_no}")
-        self.update_topology()
-
-    @set_ev_cls(event.EventHostAdd)
-    def host_add_handler(self, ev):
-        self.logger.info(f"主机加入: MAC={ev.host.mac}, IP={ev.host.ipv4}, Switch={ev.host.port.dpid}:{ev.host.port.port_no}")
-        self.update_topology()
-
     # ==================== 交换机连接初始化 ====================
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
-    def switch_features_handler(self, ev):
+    def _switch_features_handler(self, ev):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -179,12 +171,10 @@ class QoSController(app_manager.RyuApp):
     def _packet_in_handler(self, ev):
         msg = ev.msg
         datapath = msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
 
         pkt = packet.Packet(msg.data)
-        eth = pkt.get_protocols(ethernet.ethernet)[0]
+        eth = pkt.get_protocol(ethernet.ethernet)
 
         # 忽略 LLDP / IPv6
         if eth.ethertype in (ether.ETH_TYPE_LLDP, ether.ETH_TYPE_IPV6):
@@ -203,20 +193,62 @@ class QoSController(app_manager.RyuApp):
             self.handle_ipv4(datapath, in_port, msg, eth, ipv4_pkt, pkt)
             return
 
-    # ==================== 独立函数：IPv4 报文处理 ====================
+    # ==================== ARP 处理 ====================
+    def handle_arp(self, datapath, in_port, msg, eth_pkt, arp_pkt):
+        dpid = datapath.id
+        src_ip_arp, dst_ip_arp = arp_pkt.src_ip, arp_pkt.dst_ip
+        src_eth, dst_eth = eth_pkt.src, eth_pkt.dst
+        src_mac, dst_mac = arp_pkt.src_mac, arp_pkt.dst_mac
+        arp_opcode = arp_pkt.opcode
+        arp_htype = arp_pkt.hwtype
+        arp_ptype = arp_pkt.proto
+
+        arp_op_name = {1: "ARP Request", 2: "ARP Reply", 3: "RARP Request", 4: "RARP Reply"}.get(arp_opcode, f"ARP Opcode {arp_opcode}")
+
+        # 只处理以太网 IPv4 ARP
+        if arp_htype != 1 or arp_ptype != 0x0800:
+            self.logger.debug(f"[PacketIn] 非以太网IPv4 ARP，忽略: HTYPE={arp_htype}, PTYPE={hex(arp_ptype)}")
+            return
+        self.logger.info(f"[PacketIn] SW:{dpid} {arp_op_name} ETH:{src_eth}-->{dst_eth} | ARP:{src_mac}({src_ip_arp})-->{dst_mac}({dst_ip_arp})")
+
+        self._learn_host(dpid, in_port, src_eth, src_ip_arp, proto_tag="ARP")
+
+        # ARP 请求
+        if arp_opcode == arp.ARP_REQUEST:
+            if dst_ip_arp in self.ip_to_mac:
+                target_mac = self.ip_to_mac[dst_ip_arp]
+                self.send_arp_reply(datapath, eth_pkt, src_mac, src_ip_arp, target_mac, dst_ip_arp, in_port)
+                self.logger.info(f"[ARP Reply] SW:{dpid} Reply {dst_ip_arp} is {target_mac}")
+            else:
+                self.flood_arp_to_all_switches(msg.data)
+                self.logger.info(f"[ARP Flood] unknown IP {dst_ip_arp}")
+
+        # ARP 响应
+        elif arp_opcode == arp.ARP_REPLY:
+            if dst_mac in self.hosts:
+                target_dpid = self.hosts[dst_mac]['dpid']
+                target_port = self.hosts[dst_mac]['port']
+                if target_dpid in self.datapaths:
+                    target_dp = self.datapaths[target_dpid]
+                    self.send_packet_out(target_dp, target_port, msg.data)
+                    self.logger.info(f"[ARP Forward] ARP Reply → Host {dst_mac} (SW:{target_dpid}, Port:{target_port})")
+                else:
+                    self.logger.warning(f"[ARP Forward] 目标交换机不存在: {target_dpid}")
+            else:
+                self.logger.warning(f"[ARP Forward] 未知目标主机: {dst_mac}，丢弃")
+
+    # ==================== IPv4 报文处理 ====================
     def handle_ipv4(self, datapath, in_port, msg, eth, ipv4_pkt, pkt):
         """
         统一处理 IPv4 报文（TCP/UDP/ICMP）
         """
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+        ofproto, parser = datapath.ofproto, datapath.ofproto_parser
         dpid = datapath.id
-        src_ip = ipv4_pkt.src
-        dst_ip = ipv4_pkt.dst
+        dst_eth, src_eth = eth.dst, eth.src
+        src_ip, dst_ip = ipv4_pkt.src, ipv4_pkt.dst
         proto = ipv4_pkt.proto
         tos = ipv4_pkt.tos
         dscp = tos >> 2
-        dst_eth, src_eth = eth.dst, eth.src
 
         # 解析四层协议
         tcp_pkt = pkt.get_protocol(tcp.tcp)
@@ -229,30 +261,38 @@ class QoSController(app_manager.RyuApp):
         if tcp_pkt:
             src_port = tcp_pkt.src_port
             dst_port = tcp_pkt.dst_port
-            self.logger.info(f"[PacketIn] SW:{dpid} TCP {src_ip}:{src_port}-->{dst_ip}:{dst_port} {dscp}")
+            self.logger.info(f"[PacketIn] SW:{dpid} TCP {src_ip}:{src_port}-->{dst_ip}:{dst_port} {dscp if dscp else ''}")
         elif udp_pkt:
             src_port = udp_pkt.src_port
             dst_port = udp_pkt.dst_port
-            self.logger.info(f"[PacketIn] SW:{dpid} UDP {src_ip}:{src_port}-->{dst_ip}:{dst_port} {dscp}")
+            self.logger.info(f"[PacketIn] SW:{dpid} UDP {src_ip}:{src_port}-->{dst_ip}:{dst_port} {dscp if dscp else ''}")
         elif icmp_pkt:
             icmp_type = icmp_pkt.type
             if icmp_type == icmp.ICMP_ECHO_REQUEST:
-                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Request {src_ip}-->{dst_ip} {dscp}")
+                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Request {src_ip}-->{dst_ip} {dscp if dscp else ''}")
             elif icmp_type == icmp.ICMP_ECHO_REPLY:
-                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Reply {src_ip}-->{dst_ip} {dscp}")
+                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Reply {src_ip}-->{dst_ip} {dscp if dscp else ''}")
             else:
-                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Type:{icmp_type} {src_ip}-->{dst_ip} {dscp}")
+                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Type:{icmp_type} {src_ip}-->{dst_ip} {dscp if dscp else ''}")
         else:
-            self.logger.info(f"[PacketIn] SW:{dpid} proto:{str(proto)} {src_ip}-->{dst_ip} {dscp}")
+            self.logger.info(f"[PacketIn] SW:{dpid} proto:{str(proto)} {src_ip}-->{dst_ip} {dscp if dscp else ''}")
 
         # 流表匹配规则
-        flow_match = parser.OFPMatch(in_port=in_port, eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip, ip_dscp=dscp)
+        if dscp:
+            flow_match = parser.OFPMatch(in_port=in_port, eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip, ip_dscp=dscp)
+        else:
+            flow_match = parser.OFPMatch(in_port=in_port, eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
+
         if dst_ip in self.ip_to_mac:
             dst_eth = self.ip_to_mac[dst_ip]
+        else:
+            self.logger.info(f"[PacketIn] SW:{dpid} {dst_ip} not in ip_to_mac")
 
         # 路由与转发决策
         if dst_eth not in self.hosts:
             self.send_arp_request_for_ip(datapath, src_eth, src_ip, dst_ip)
+            self.logger.info(f"[ARP Flood] 模拟 {src_ip}({src_eth}) 发送 ARP 请求查询 {dst_ip}")
+            # todo 处理当前报文
             return
 
         dst_dpid = self.hosts[dst_eth]['dpid']
@@ -282,51 +322,6 @@ class QoSController(app_manager.RyuApp):
             in_port=in_port, actions=actions, data=data
         )
         datapath.send_msg(out)
-
-    # ==================== ARP 处理 ====================
-    def handle_arp(self, datapath, in_port, msg, eth_pkt, arp_pkt):
-        dpid = datapath.id
-        src_ip_arp, dst_ip_arp = arp_pkt.src_ip, arp_pkt.dst_ip
-        src_eth, dst_eth = eth_pkt.src, eth_pkt.dst
-        src_mac, dst_mac = arp_pkt.src_mac, arp_pkt.dst_mac
-        arp_opcode = arp_pkt.opcode
-        arp_htype = arp_pkt.hwtype
-        arp_ptype = arp_pkt.proto
-
-        arp_op_name = {1: "ARP Request", 2: "ARP Reply", 3: "RARP Request", 4: "RARP Reply"}.get(arp_opcode, f"ARP Opcode {arp_opcode}")
-
-        # 只处理以太网 IPv4 ARP
-        if arp_htype != 1 or arp_ptype != 0x0800:
-            self.logger.debug(f"[PacketIn] 非以太网IPv4 ARP，忽略: HTYPE={arp_htype}, PTYPE={hex(arp_ptype)}")
-            return
-
-        self.logger.info(f"[PacketIn] SW:{dpid} {arp_op_name} ETH:{src_eth}-->{dst_eth} | ARP:{src_mac}({src_ip_arp})-->{dst_mac}({dst_ip_arp})")
-
-        self._learn_host(dpid, in_port, src_eth, src_ip_arp, proto_tag="ARP")
-
-        # ARP 请求
-        if arp_opcode == arp.ARP_REQUEST:
-            if dst_ip_arp in self.ip_to_mac:
-                target_mac = self.ip_to_mac[dst_ip_arp]
-                self.send_arp_reply(datapath, eth_pkt, arp_pkt, src_mac, src_ip_arp, target_mac, dst_ip_arp, in_port)
-                self.logger.info(f"[ARP Reply] SW:{dpid} Reply {dst_ip_arp} is {target_mac}")
-            else:
-                self.flood_arp_to_all_switches(msg.data)
-                self.logger.info(f"[ARP Flood] 未知IP {dst_ip_arp}，控制器向全网泛洪")
-
-        # ARP 响应
-        elif arp_opcode == arp.ARP_REPLY:
-            if dst_mac in self.hosts:
-                target_dpid = self.hosts[dst_mac]['dpid']
-                target_port = self.hosts[dst_mac]['port']
-                if target_dpid in self.datapaths:
-                    target_dp = self.datapaths[target_dpid]
-                    self.send_packet_out(target_dp, target_port, msg.data)
-                    self.logger.info(f"[ARP Forward] 控制器转发ARP Reply → Host {dst_mac} (SW:{target_dpid}, Port:{target_port})")
-                else:
-                    self.logger.warning(f"[ARP Forward] 目标交换机不存在: {target_dpid}")
-            else:
-                self.logger.warning(f"[ARP Forward] 未知目标主机: {dst_mac}，丢弃")
 
     # ==================== 【新增】通用主机学习函数 ====================
     def _learn_host(self, dpid, in_port, src_eth, src_ip, proto_tag=""):
@@ -373,18 +368,15 @@ class QoSController(app_manager.RyuApp):
 
             self.ip_to_mac[src_ip] = src_eth
 
-    def send_arp_reply(self, datapath, eth_pkt, arp_pkt, src_mac, src_ip, dst_mac, dst_ip, in_port):
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-
+    def send_arp_reply(self, datapath, eth_pkt, src_mac, src_ip, dst_mac, dst_ip, in_port):
         pkt = packet.Packet()
         pkt.add_protocol(ethernet.ethernet(ethertype=eth_pkt.ethertype, src=dst_mac, dst=src_mac))
         pkt.add_protocol(arp.arp(opcode=arp.ARP_REPLY, src_mac=dst_mac, src_ip=dst_ip, dst_mac=src_mac, dst_ip=src_ip))
         pkt.serialize()
-
         self.send_packet_out(datapath, in_port, pkt.data)
 
     def send_packet_out(self, datapath, port, pkt_data):
+        # 向交换机发送指令，令交换机从指定端口发送数据包
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         actions = [parser.OFPActionOutput(port)]
@@ -402,9 +394,6 @@ class QoSController(app_manager.RyuApp):
         :param src_ip: 源主机 IP
         :param target_ip: 需要查询的目标 IP
         """
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-
         # 构造 ARP 请求报文
         pkt = packet.Packet()
         # 1. 以太网头：广播地址
@@ -422,8 +411,6 @@ class QoSController(app_manager.RyuApp):
             dst_ip=target_ip
         ))
         pkt.serialize()
-
-        self.logger.info(f"[ARP Probe] 模拟 {src_ip}({src_mac}) 发送 ARP 请求查询 {target_ip}")
         # 调用通用泛洪函数发送
         self.flood_packet_to_all_host_ports(pkt.data)
 
@@ -612,10 +599,12 @@ class QoSController(app_manager.RyuApp):
 
         if buffer_id:
             mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id, priority=priority,
-                                    match=match, instructions=inst, idle_timeout=idle_timeout, hard_timeout=hard_timeout)
+                                    match=match, instructions=inst,
+                                    idle_timeout=idle_timeout, hard_timeout=hard_timeout)
         else:
             mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
-                                    match=match, instructions=inst, idle_timeout=idle_timeout, hard_timeout=hard_timeout)
+                                    match=match, instructions=inst,
+                                    idle_timeout=idle_timeout, hard_timeout=hard_timeout)
         datapath.send_msg(mod)
 
         # ==================== 最短路径（使用 networkx） ====================
@@ -657,6 +646,14 @@ class QoSController(app_manager.RyuApp):
         if self.graph.has_edge(src, next_hop):
             return self.graph[src][next_hop].get('src_port')
         return None
+
+    def _request_port_stats(self):
+        """向所有交换机发送端口统计请求"""
+        for dpid, datapath in self.datapaths.items():
+            ofproto = datapath.ofproto
+            parser = datapath.ofproto_parser
+            req = parser.OFPPortStatsRequest(datapath, port_no=ofproto.OFPP_ANY)
+            datapath.send_msg(req)
 
 
 # ===================== Web 服务 =====================
