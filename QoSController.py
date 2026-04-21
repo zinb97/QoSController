@@ -7,6 +7,7 @@ from ryu.topology.api import get_switch, get_link, get_host
 from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 from ryu.lib import hub
 from ryu.lib.packet import packet, ethernet, arp, ipv4, icmp, tcp, udp, ipv6, igmp
+from collections import deque
 
 import json
 import os
@@ -38,6 +39,8 @@ class QoSController(app_manager.RyuApp):
         self.datapaths = {}             # 保存所有交换机
         # 组播组管理: {组播组地址: {dpid: {MAC地址: (src_ip, in_port)}}}
         self.multicast_groups = {}
+        # 组播流规则记录: {组播组地址: [(dpid, match_description), ...]}
+        self.multicast_flows = {}
 
         # 拓扑相关 - 使用 networkx DiGraph
         self.graph = nx.DiGraph()        # 保存完整拓扑（节点=交换机，边=链路）
@@ -375,7 +378,74 @@ class QoSController(app_manager.RyuApp):
             is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, bandwidth_matrix, loss_matrix, source_node=src_switch_dpid, destination_group=list(member_dpid_set))
             if is_success:
                 self.logger.info(f"[Multicast Route] Route Matrix:\n {route_matrix}")
-                #todo：根据route_matrix构建出来的组播路由安装流规则
+
+                # 将邻接矩阵的双向性变成从源到目的集合的单向性矩阵（BFS）
+                src_idx = self.adj_matrix_nodes.index(src_switch_dpid)
+                visited = set()
+                queue = deque([src_idx])
+                visited.add(src_idx)
+
+                while queue:
+                    i = queue.popleft()
+                    for j in range(netsize):
+                        if route_matrix[i, j] == 1:
+                            route_matrix[j, i] = 0  # 删除反向边，确保单向性
+                            if j not in visited:
+                                queue.append(j)
+                                visited.add(j)
+
+                self.logger.info(f"[Multicast Route] Unidirectional Route Matrix:\n {route_matrix}")
+
+                # 根据单向性矩阵安装组播流规则
+                installed_flows = []
+                for i in range(netsize):
+                    src_node_dpid = self.adj_matrix_nodes[i]
+                    if src_node_dpid not in self.datapaths:
+                        continue
+
+                    src_datapath = self.datapaths[src_node_dpid]
+                    src_parser = src_datapath.ofproto_parser
+
+                    # 收集该节点需要转发到的所有下一跳
+                    out_actions = []
+                    if src_node_dpid in member_dpid_set:
+                        # 目的交换机，转发到主机端口
+                        for mac, (member_ip, member_port) in self.multicast_groups[dst_ip].get(src_node_dpid,{}).items():
+                            out_actions.append(src_parser.OFPActionOutput(member_port))
+                            self.logger.info(f"[Multicast Flow] SW:{src_node_dpid} -> host port {member_port}")
+                    else:
+                        # 源交换机或中间交换机
+                        for j in range(netsize):
+                            if route_matrix[i][j] == 1:
+                                dst_node_dpid = self.adj_matrix_nodes[j]
+
+                                # 转发到下一跳交换机端口
+                                out_port = self.get_path_out_port(src_node_dpid, dst_node_dpid)
+                                if out_port:
+                                    out_actions.append(src_parser.OFPActionOutput(out_port))
+                                    self.logger.info(f"[Multicast Flow] SW:{src_node_dpid} -> port {out_port} (next hop SW:{dst_node_dpid})")
+
+                    if out_actions:
+                        # todo：源交换机需要匹配 in_port + src_ip + 组播地址，其他交换机只匹配 src_ip + 组播地址
+                        if src_node_dpid == src_switch_dpid:
+                            match = src_parser.OFPMatch(
+                                in_port=in_port,
+                                eth_type=0x0800,
+                                ipv4_dst=dst_ip
+                            )
+                        else:
+                            match = src_parser.OFPMatch(
+                                eth_type=0x0800,
+                                ipv4_dst=dst_ip
+                            )
+                        self.add_flow(src_datapath, 100, match, out_actions, idle_timeout=300, hard_timeout=0)
+                        installed_flows.append((src_node_dpid, f"ipv4_dst={dst_ip} -> {len(out_actions)} port(s)"))
+
+                # 记录已安装的流规则
+                if dst_ip not in self.multicast_flows:
+                    self.multicast_flows[dst_ip] = []
+                self.multicast_flows[dst_ip].extend(installed_flows)
+                self.logger.info(f"[Multicast Flow] Group {dst_ip} installed {len(installed_flows)} flow rules")
 
             else:
                 self.logger.info(f"[Multicast Route] Route Matrix: failed")
