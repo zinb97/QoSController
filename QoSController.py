@@ -11,10 +11,12 @@ from ryu.lib.packet import packet, ethernet, arp, ipv4, icmp, tcp, udp, ipv6, ig
 import json
 import os
 import time
+import numpy as np
 import networkx as nx
 from webob import Response
 
 import utils
+from client import RL_multicast_tree
 
 topology_api_name = 'topology_api'
 
@@ -39,6 +41,8 @@ class QoSController(app_manager.RyuApp):
 
         # 拓扑相关 - 使用 networkx DiGraph
         self.graph = nx.DiGraph()        # 保存完整拓扑（节点=交换机，边=链路）
+        self.adj_matrix_nodes = []       # 邻接矩阵的节点顺序列表（索引->dpid映射）
+        self.host_ip_to_dpid = {}        # 主机IP -> 所在交换机DPID 映射
         self.topology_data = {"switches": [], "links": [], "hosts": []}
 
         # 端口统计（用于计算链路负载）
@@ -331,13 +335,50 @@ class QoSController(app_manager.RyuApp):
 
         # 检查该组播组是否有成员
         if dst_ip in self.multicast_groups and self.multicast_groups[dst_ip]:
-            # 收集所有成员信息
+            # 根据 src_ip 确定源交换机节点的 dpid
+            src_switch_dpid = self.host_ip_to_dpid.get(src_ip)
+            if not src_switch_dpid:
+                self.logger.warning(f"[Multicast Route] Cannot find source switch for IP: {src_ip}")
+                return
+
+            # 收集所有成员信息（去重）
             member_ips = []
+            member_dpid_set = set()
             for group_dpid, mac_dict in self.multicast_groups[dst_ip].items():
+                member_dpid_set.add(group_dpid)
                 for mac, (member_ip, member_port) in mac_dict.items():
                     member_ips.append(member_ip)
 
-            self.logger.info(f"[Multicast Route] Source: {src_ip}, Destination Group: {member_ips}")
+            self.logger.info(f"[Multicast Route] Source: {src_ip} -> SW:{src_switch_dpid}")
+            self.logger.info(f"[Multicast Route] Member Hosts in Destination Group: {member_ips}")
+            self.logger.info(f"[Multicast Route] Member Switches: {member_dpid_set}")
+
+            # 将 self.graph 转换为邻接矩阵
+            self.adj_matrix_nodes = sorted(self.graph.nodes())
+            adj_matrix = nx.to_numpy_array(self.graph, nodelist=self.adj_matrix_nodes, dtype=np.float32)
+
+            netsize = len(self.adj_matrix_nodes)
+
+            np.random.seed(42)
+            latency_base = np.random.uniform(1, 100, (netsize, netsize))
+            latency_matrix = (latency_base + latency_base.T) / 2 * adj_matrix
+
+            # 生成随机带宽矩阵 (对称矩阵，只看上三角)
+            bandwidth_base = np.random.uniform(10, 1000, (netsize, netsize))
+            bandwidth_matrix = (bandwidth_base + bandwidth_base.T) / 2 * adj_matrix
+
+            # 生成随机丢包矩阵 (对称矩阵，只看上三角)
+            loss_base = np.random.uniform(0.001, 0.1, (netsize, netsize))
+            loss_matrix = (loss_base + loss_base.T) / 2 * adj_matrix
+
+            # 调用智能组播路由构建算法构建组播路由
+            is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, bandwidth_matrix, loss_matrix, source_node=src_switch_dpid, destination_group=list(member_dpid_set))
+            if is_success:
+                self.logger.info(f"[Multicast Route] Route Matrix:\n {route_matrix}")
+                #todo：根据route_matrix构建出来的组播路由安装流规则
+
+            else:
+                self.logger.info(f"[Multicast Route] Route Matrix: failed")
 
             # 转发到所有组播成员
             # self.forward_to_multicast_members(datapath, in_port, msg, dst_ip)
@@ -701,6 +742,7 @@ class QoSController(app_manager.RyuApp):
             self.inter_switch_ports[dst_dpid].add(dst_port)
 
         # 主机信息更新
+        self.host_ip_to_dpid = {}  # 清空并重建
         for h in host_list:
             if not h.port:
                 continue
@@ -714,6 +756,10 @@ class QoSController(app_manager.RyuApp):
                     self.hosts[mac]['ip'] = ip
             else:
                 self.hosts[mac] = {'mac': mac, 'ip': ip, 'dpid': h.port.dpid, 'port': h.port.port_no}
+
+            # 更新主机IP -> 交换机DPID 映射
+            if ip:
+                self.host_ip_to_dpid[ip] = h.port.dpid
 
         # 从 graph 提取 topology_data
         self.topology_data = self._build_topology_data()
