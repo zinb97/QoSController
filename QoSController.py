@@ -93,6 +93,51 @@ class QoSController(app_manager.RyuApp):
         self.logger.info(f"删除链路: {ev.link.src.dpid}:{ev.link.src.port_no} <-> {ev.link.dst.dpid}:{ev.link.dst.port_no}")
         self.update_topology()
 
+        datapath = self.datapaths[ev.link.src.dpid]
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        match = parser.OFPMatch()  # 空匹配 = 所有流表
+        del_all = parser.OFPFlowMod(
+            datapath=datapath,
+            command=ofproto.OFPFC_DELETE,
+            table_id=0,
+            priority=0,
+            out_port=ofproto.OFPP_ANY,
+            out_group=ofproto.OFPG_ANY,
+            match=match
+        )
+        datapath.send_msg(del_all)
+
+        match1 = parser.OFPMatch(
+            eth_dst="01:80:c2:00:00:0e",
+            eth_type=0x88cc
+        )
+        actions1 = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 65535)]
+        inst1 = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions1)]
+        flow1 = parser.OFPFlowMod(
+            datapath=datapath,
+            table_id=0,
+            priority=65535,
+            match=match1,
+            instructions=inst1
+        )
+        datapath.send_msg(flow1)
+
+        match0 = parser.OFPMatch()
+        actions0 = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 65535)]
+        inst0 = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions0)]
+        flow0 = parser.OFPFlowMod(
+            datapath=datapath,
+            table_id=0,
+            priority=0,
+            match=match0,
+            instructions=inst0
+        )
+        datapath.send_msg(flow0)
+
+        self.logger.info(f"[Switch Init] Clear all flow entries on Switch {datapath.id}")
+
     @set_ev_cls(event.EventHostAdd)
     def host_add_handler(self, ev):
         self.logger.info(f"主机加入: MAC={ev.host.mac}, IP={ev.host.ipv4}, Switch={ev.host.port.dpid}:{ev.host.port.port_no}")
@@ -278,12 +323,6 @@ class QoSController(app_manager.RyuApp):
         else:
             self.logger.info(f"[PacketIn] SW:{sw_name} proto:{str(proto)} {src_ip}-->{dst_ip} {dscp if dscp else ''}")
 
-        # 流表匹配规则
-        if dscp:
-            flow_match = parser.OFPMatch(in_port=in_port, eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip, ip_dscp=dscp)
-        else:
-            flow_match = parser.OFPMatch(in_port=in_port, eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
-
         if dst_ip in self.ip_to_mac:
             dst_eth = self.ip_to_mac[dst_ip]
         else:
@@ -300,9 +339,12 @@ class QoSController(app_manager.RyuApp):
         dst_port = self.hosts[dst_eth]['port']
         src_dpid = self.hosts[src_eth]['dpid']
         src_port = self.hosts[src_eth]['port']
+        priority = 101 if dscp else 10
 
         # 同交换机直接转发
         if dpid == dst_dpid:
+            # 流表匹配规则
+            flow_match = parser.OFPMatch(in_port=in_port, eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
             out_port = dst_port
             actions = [parser.OFPActionOutput(out_port)]
             # 下发流表
@@ -356,18 +398,20 @@ class QoSController(app_manager.RyuApp):
         for ps in path_switches:
             sw_dp = self.datapaths.get(ps['dpid'])
             if sw_dp:
-                match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
+                if dscp:
+                    match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip, ip_dscp=dscp)
+                else:
+                    match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
                 actions = [parser.OFPActionOutput(ps['out_port'])]
-                self.add_flow(sw_dp, 101, match, actions)
+                self.add_flow(sw_dp, priority, match, actions)
                 self.logger.info(f"[Flow] {self.sw_name(ps['dpid'])}: {ps['in_port']} -> {ps['out_port']} (dst={dst_ip})")
 
-        # 下发反向流表 (ipv4_src)
-        for ps in path_switches:
-            sw_dp = self.datapaths.get(ps['dpid'])
-            if sw_dp:
-                match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=src_ip)
+                if dscp:
+                    match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=src_ip, ip_dscp=dscp)
+                else:
+                    match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=src_ip)
                 actions = [parser.OFPActionOutput(ps['in_port'])]
-                self.add_flow(sw_dp, 101, match, actions)
+                self.add_flow(sw_dp, priority, match, actions)
                 self.logger.info(f"[Flow] {self.sw_name(ps['dpid'])}: {ps['out_port']} -> {ps['in_port']} (dst={src_ip})")
 
         # 发送当前报文
