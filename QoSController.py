@@ -320,7 +320,7 @@ class QoSController(app_manager.RyuApp):
     # ==================== UDP 组播处理 ====================
     def handle_udp_multicast(self, datapath, in_port, msg, eth, ipv4_pkt, src_ip, dst_ip):
         """
-        处理 UDP 组播报文，根据组播组成员决定是否转发
+        处理 UDP 组播报文，根据组播组成员决定是否安装流规则，控制器自身不转发组播报文
         """
         dpid = datapath.id
         src_mac = eth.src
@@ -340,7 +340,7 @@ class QoSController(app_manager.RyuApp):
             self.logger.info(f"[Multicast Route] Source: {src_ip}, Destination Group: {member_ips}")
 
             # 转发到所有组播成员
-            self.forward_to_multicast_members(datapath, in_port, msg, dst_ip)
+            # self.forward_to_multicast_members(datapath, in_port, msg, dst_ip)
         else:
             self.logger.info(f"[UDP Multicast] Group {dst_ip} has no members, dropping packet")
 
