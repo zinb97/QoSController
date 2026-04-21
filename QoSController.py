@@ -6,7 +6,7 @@ from ryu.topology import event
 from ryu.topology.api import get_switch, get_link, get_host
 from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 from ryu.lib import hub
-from ryu.lib.packet import packet, ethernet, arp, ipv4, icmp, tcp, udp, ipv6
+from ryu.lib.packet import packet, ethernet, arp, ipv4, icmp, tcp, udp, ipv6, igmp
 
 import json
 import os
@@ -34,6 +34,8 @@ class QoSController(app_manager.RyuApp):
         self.ip_to_mac = {}             # ip -> mac
         self.inter_switch_ports = {}    # {dpid: set(port_no, ...)}
         self.datapaths = {}             # 保存所有交换机
+        # 组播组管理: {组播组地址: {dpid: {MAC地址: (src_ip, in_port)}}}
+        self.multicast_groups = {}
 
         # 拓扑相关 - 使用 networkx DiGraph
         self.graph = nx.DiGraph()        # 保存完整拓扑（节点=交换机，边=链路）
@@ -188,6 +190,13 @@ class QoSController(app_manager.RyuApp):
         arp_pkt = pkt.get_protocol(arp.arp)
         ipv4_pkt = pkt.get_protocol(ipv4.ipv4)
 
+        # IGMP 处理
+        if ipv4_pkt and ipv4_pkt.proto == 2:  # IGMP protocol number
+            igmp_pkt = pkt.get_protocol(igmp.igmp)
+            if igmp_pkt:
+                self.handle_igmp(datapath, in_port, eth, ipv4_pkt, igmp_pkt)
+                return
+
         # ARP 处理
         if arp_pkt:
             self.handle_arp(datapath, in_port, msg, eth, arp_pkt)
@@ -238,6 +247,11 @@ class QoSController(app_manager.RyuApp):
         else:
             self.logger.info(f"[PacketIn] SW:{dpid} proto:{str(proto)} {src_ip}-->{dst_ip}")
 
+        # UDP 组播报文处理
+        if udp_pkt and self._is_multicast_ip(dst_ip):
+            self.handle_udp_multicast(datapath, in_port, msg, eth, ipv4_pkt, src_ip, dst_ip)
+            return
+
         # 流表匹配规则
         flow_match = parser.OFPMatch(in_port=in_port, eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
         if dst_ip in self.ip_to_mac:
@@ -274,6 +288,155 @@ class QoSController(app_manager.RyuApp):
             in_port=in_port, actions=actions, data=data
         )
         datapath.send_msg(out)
+
+    # ==================== IGMP 处理 ====================
+    def handle_igmp(self, datapath, in_port, eth, ipv4_pkt, igmp_pkt):
+        """
+        处理 IGMP 报文（加入/离开组播组）
+        """
+        dpid = datapath.id
+        src_ip = ipv4_pkt.src
+        src_mac = eth.src
+        multicast_addr = igmp_pkt.address
+        msgtype = igmp_pkt.msgtype
+
+        igmp_type_names = {
+            0x11: "Membership Query",
+            0x12: "Membership Report (v1)",
+            0x16: "Membership Report (v2)",
+            0x17: "Leave Group (v2)"
+        }
+        type_name = igmp_type_names.get(msgtype, "Unknown")
+
+        self.logger.info(f"[IGMP] SW:{dpid} IGMP {type_name} from {src_ip} for group {multicast_addr}")
+
+        # msgtype 0x12/0x16 = Join (加入组播组)
+        if msgtype in [0x12, 0x16]:
+            self.add_member_to_group(dpid, src_mac, src_ip, multicast_addr, in_port)
+        # msgtype 0x17 = Leave (离开组播组)
+        elif msgtype == 0x17:
+            self.remove_member_from_group(dpid, src_mac, multicast_addr)
+
+    # ==================== UDP 组播处理 ====================
+    def handle_udp_multicast(self, datapath, in_port, msg, eth, ipv4_pkt, src_ip, dst_ip):
+        """
+        处理 UDP 组播报文，根据组播组成员决定是否转发
+        """
+        dpid = datapath.id
+        src_mac = eth.src
+        src_port = 0
+        dst_port = 0
+
+        self.logger.info(f"[UDP Multicast] SW:{dpid} UDP Multicast {src_ip}-->{dst_ip}")
+
+        # 检查该组播组是否有成员
+        if dst_ip in self.multicast_groups and self.multicast_groups[dst_ip]:
+            # 收集所有成员信息
+            member_ips = []
+            for group_dpid, mac_dict in self.multicast_groups[dst_ip].items():
+                for mac, (member_ip, member_port) in mac_dict.items():
+                    member_ips.append(member_ip)
+
+            self.logger.info(f"[Multicast Route] Source: {src_ip}, Destination Group: {member_ips}")
+
+            # 转发到所有组播成员
+            self.forward_to_multicast_members(datapath, in_port, msg, dst_ip)
+        else:
+            self.logger.info(f"[UDP Multicast] Group {dst_ip} has no members, dropping packet")
+
+    def forward_to_multicast_members(self, datapath, in_port, msg, multicast_addr):
+        """
+        将组播数据转发到所有组播组成员
+        """
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        dpid = datapath.id
+
+        actions = []
+        for group_dpid, mac_dict in self.multicast_groups[multicast_addr].items():
+            for mac, (member_ip, member_port) in mac_dict.items():
+                # 只转发到同一交换机上的成员，或者通过最短路径转发到其他交换机
+                if group_dpid == dpid:
+                    actions.append(parser.OFPActionOutput(member_port))
+                else:
+                    # 跨交换机转发 - 找到到目标交换机的出端口
+                    out_port = self.get_path_out_port(dpid, group_dpid)
+                    if out_port:
+                        actions.append(parser.OFPActionOutput(out_port))
+
+        if actions:
+            out = parser.OFPPacketOut(
+                datapath=datapath,
+                buffer_id=msg.buffer_id,
+                in_port=in_port,
+                actions=actions,
+                data=msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
+            )
+            datapath.send_msg(out)
+            self.logger.info(f"[Multicast Forward] Forwarded to {len(actions)} member(s)")
+        else:
+            self.logger.info(f"[Multicast Forward] No valid path to members, dropping")
+
+    def _is_multicast_ip(self, ip):
+        """检查是否为组播 IP 地址 (224.0.0.0 - 239.255.255.255)"""
+        ip_parts = [int(x) for x in ip.split('.')]
+        return ip_parts[0] >= 224 and ip_parts[0] <= 239
+
+    # ==================== 组播组管理 ====================
+    def add_member_to_group(self, dpid, mac, src_ip, multicast_addr, in_port):
+        """
+        将主机加入组播组
+        """
+        if multicast_addr not in self.multicast_groups:
+            self.multicast_groups[multicast_addr] = {}
+
+        if dpid not in self.multicast_groups[multicast_addr]:
+            self.multicast_groups[multicast_addr][dpid] = {}
+
+        self.multicast_groups[multicast_addr][dpid][mac] = (src_ip, in_port)
+        self.logger.info(f"[Multicast Group] Host joined: Group={multicast_addr}, MAC={mac}, IP={src_ip}, SW={dpid}, Port={in_port}")
+        self.print_multicast_groups()
+
+    def remove_member_from_group(self, dpid, mac, multicast_addr):
+        """
+        将主机从组播组删除
+        """
+        if multicast_addr in self.multicast_groups:
+            if dpid in self.multicast_groups[multicast_addr]:
+                if mac in self.multicast_groups[multicast_addr][dpid]:
+                    del self.multicast_groups[multicast_addr][dpid][mac]
+                    self.logger.info(f"[Multicast Group] Host left: Group={multicast_addr}, MAC={mac}")
+
+                    # 如果该组播组在该交换机上没有成员了，删除该交换机的记录
+                    if not self.multicast_groups[multicast_addr][dpid]:
+                        del self.multicast_groups[multicast_addr][dpid]
+
+                    # 如果所有交换机都没有该组播组的成员了，删除该组播组
+                    if not self.multicast_groups[multicast_addr]:
+                        del self.multicast_groups[multicast_addr]
+                else:
+                    self.logger.info(f"[Multicast Group] Host not in group: MAC={mac}")
+            else:
+                self.logger.info(f"[Multicast Group] Switch has no members in group")
+        else:
+            self.logger.info(f"[Multicast Group] Group does not exist")
+        self.print_multicast_groups()
+
+    def print_multicast_groups(self):
+        """
+        打印当前所有组播组信息
+        """
+        self.logger.info("========== Multicast Group State ==========")
+        if not self.multicast_groups:
+            self.logger.info("  No multicast members")
+        for group, dpid_dict in self.multicast_groups.items():
+            self.logger.info(f"  Group {group}:")
+            for dpid, mac_dict in dpid_dict.items():
+                self.logger.info(f"    Switch {dpid}:")
+                for mac, (src_ip, port) in mac_dict.items():
+                    self.logger.info(f"      MAC={mac}, IP={src_ip}, Port={port}")
+        self.logger.info("=========================================")
+
 
     # ==================== ARP 处理 ====================
     def handle_arp(self, datapath, in_port, msg, eth_pkt, arp_pkt):
