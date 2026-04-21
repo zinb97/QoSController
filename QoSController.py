@@ -256,6 +256,10 @@ class QoSController(app_manager.RyuApp):
 
         # UDP 组播报文处理
         if udp_pkt and self._is_multicast_ip(dst_ip):
+            # 如果该组播组已经安装过流表，则丢弃；否则处理并安装流表
+            if dst_ip in self.multicast_flows and self.multicast_flows[dst_ip]:
+                self.logger.info(f"[UDP Multicast] Group {dst_ip} already has flow rules installed, dropping packet")
+                return
             self.handle_udp_multicast(datapath, in_port, msg, eth, ipv4_pkt, src_ip, dst_ip)
             return
 
@@ -377,6 +381,7 @@ class QoSController(app_manager.RyuApp):
             # 调用智能组播路由构建算法构建组播路由
             is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, bandwidth_matrix, loss_matrix, source_node=src_switch_dpid, destination_group=list(member_dpid_set))
             if is_success:
+                # 组播路由构建成功，安装流规则
                 self.logger.info(f"[Multicast Route] Route Matrix:\n {route_matrix}")
 
                 # 将邻接矩阵的双向性变成从源到目的集合的单向性矩阵（BFS）
