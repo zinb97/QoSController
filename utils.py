@@ -26,11 +26,25 @@ _DELAY_UNITS = {
 def get_tc_stats_optimized(dev):
     bandwidth, delay, loss = None, 0.0, 0.0
     try:
-        cmd = f"tc class show dev {dev}; tc qdisc show dev {dev}"
-        output = subprocess.check_output(cmd, shell=True, text=True)
+        class_output = subprocess.check_output(
+            ["tc", "class", "show", "dev", dev],
+            text=True,
+            timeout=2  # ✅ 超时保护：2秒没返回就放弃，防止卡死
+        )
+        # 第二条 tc qdisc
+        qdisc_output = subprocess.check_output(
+            ["tc", "qdisc", "show", "dev", dev],
+            text=True,
+            timeout=2
+        )
+        # 合并输出
+        output = class_output + "\n" + qdisc_output
+        lines = output.splitlines()
         lines = output.splitlines()
     except subprocess.CalledProcessError:
         return None, 0.0, 0.0
+    except Exception:
+        print(f'{Exception}\nrun error {dev}')
 
     # 2. 单次遍历同时解析所有指标
     for line in lines:

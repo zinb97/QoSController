@@ -169,6 +169,11 @@ class QoSController(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions, idle_timeout=0)
 
+        for dscp in [1, 2, 4, 8]:
+            match = parser.OFPMatch(eth_type=0x0800, ip_dscp=dscp)
+            actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
+            self.add_flow(datapath, 100, match, actions, idle_timeout=0)
+
     # ==================== 核心：PacketIn 处理 ====================
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -209,6 +214,8 @@ class QoSController(app_manager.RyuApp):
         src_ip = ipv4_pkt.src
         dst_ip = ipv4_pkt.dst
         proto = ipv4_pkt.proto
+        tos = ipv4_pkt.tos
+        dscp = tos >> 2
         dst_eth, src_eth = eth.dst, eth.src
 
         # 解析四层协议
@@ -222,24 +229,24 @@ class QoSController(app_manager.RyuApp):
         if tcp_pkt:
             src_port = tcp_pkt.src_port
             dst_port = tcp_pkt.dst_port
-            self.logger.info(f"[PacketIn] SW:{dpid} TCP {src_ip}:{src_port}-->{dst_ip}:{dst_port}")
+            self.logger.info(f"[PacketIn] SW:{dpid} TCP {src_ip}:{src_port}-->{dst_ip}:{dst_port} {dscp}")
         elif udp_pkt:
             src_port = udp_pkt.src_port
             dst_port = udp_pkt.dst_port
-            self.logger.info(f"[PacketIn] SW:{dpid} UDP {src_ip}:{src_port}-->{dst_ip}:{dst_port}")
+            self.logger.info(f"[PacketIn] SW:{dpid} UDP {src_ip}:{src_port}-->{dst_ip}:{dst_port} {dscp}")
         elif icmp_pkt:
             icmp_type = icmp_pkt.type
             if icmp_type == icmp.ICMP_ECHO_REQUEST:
-                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Request {src_ip}-->{dst_ip}")
+                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Request {src_ip}-->{dst_ip} {dscp}")
             elif icmp_type == icmp.ICMP_ECHO_REPLY:
-                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Reply {src_ip}-->{dst_ip}")
+                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Reply {src_ip}-->{dst_ip} {dscp}")
             else:
-                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Type:{icmp_type} {src_ip}-->{dst_ip}")
+                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Type:{icmp_type} {src_ip}-->{dst_ip} {dscp}")
         else:
-            self.logger.info(f"[PacketIn] SW:{dpid} proto:{str(proto)} {src_ip}-->{dst_ip}")
+            self.logger.info(f"[PacketIn] SW:{dpid} proto:{str(proto)} {src_ip}-->{dst_ip} {dscp}")
 
         # 流表匹配规则
-        flow_match = parser.OFPMatch(in_port=in_port, eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
+        flow_match = parser.OFPMatch(in_port=in_port, eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip, ip_dscp=dscp)
         if dst_ip in self.ip_to_mac:
             dst_eth = self.ip_to_mac[dst_ip]
 
@@ -256,8 +263,8 @@ class QoSController(app_manager.RyuApp):
             out_port = dst_port
             actions = [parser.OFPActionOutput(out_port)]
         else:
-            # 跨交换机最短路径
-            out_port = self.get_path_out_port(dpid, dst_dpid)
+            # 跨交换机最短路径（根据 DSCP 选择路由策略）
+            out_port = self.get_path_out_port(dpid, dst_dpid, dscp)
             if not out_port:
                 return
             actions = [parser.OFPActionOutput(out_port)]
@@ -265,7 +272,8 @@ class QoSController(app_manager.RyuApp):
         # 下发流表
         if out_port != ofproto.OFPP_FLOOD and flow_match:
             buffer_id = msg.buffer_id if msg.buffer_id != ofproto.OFP_NO_BUFFER else None
-            self.add_flow(datapath, 1, flow_match, actions, buffer_id)
+            priority = 1 if dscp > 0 else 101
+            self.add_flow(datapath, priority, flow_match, actions, buffer_id)
 
         # 发送当前报文
         data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
@@ -611,21 +619,37 @@ class QoSController(app_manager.RyuApp):
         datapath.send_msg(mod)
 
         # ==================== 最短路径（使用 networkx） ====================
-    def get_shortest_path(self, src, dst):
-        """使用 networkx Dijkstra 算法计算最短路径"""
+    def get_shortest_path(self, src, dst, dscp=None):
+        """使用 networkx Dijkstra 算法计算最短路径
+        dscp: 1=带宽优先, 2=时延优先, 4=丢包率优先, 8=负载优先, None=默认延迟+负载
+        """
         if src == dst:
             return [src]
         if src not in self.graph or dst not in self.graph:
             return None
         try:
-            path = nx.shortest_path(self.graph, src, dst)
+            if dscp == 1:
+                def weight_bw(u, v, d):
+                    bw = d.get("bw", 0)
+                    return 1.0 / (bw + 0.001)
+                path = nx.shortest_path(self.graph, src, dst, weight=weight_bw)
+            elif dscp == 2:
+                path = nx.shortest_path(self.graph, src, dst, weight='delay')
+            elif dscp == 4:
+                path = nx.shortest_path(self.graph, src, dst, weight='loss')
+            elif dscp == 8:
+                def weight_load(u, v, d):
+                    return 1.0 / (d.get("bw", 1) - d.get("total_bps", 0)) if d.get("bw", 1) != d.get("total_bps", 0) else 9999
+                path = nx.shortest_path(self.graph, src, dst, weight=weight_load)
+            else:
+                path = nx.shortest_path(self.graph, src, dst)
             return path
         except nx.NetworkXNoPath:
             return None
 
-    def get_path_out_port(self, src, dst):
+    def get_path_out_port(self, src, dst, dscp=None):
         """获取最短路径上下一个交换机的出端口"""
-        path = self.get_shortest_path(src, dst)
+        path = self.get_shortest_path(src, dst, dscp)
         if not path or len(path) <= 1:
             return None
         next_hop = path[1]
