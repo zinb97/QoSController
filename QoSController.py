@@ -168,7 +168,7 @@ class QoSController(app_manager.RyuApp):
                     match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP,
                                             ipv4_src=src_ip, ipv4_dst=dst_ip)
                 actions = [parser.OFPActionOutput(ps['out_port'])]
-                self.add_flow(sw_dp, priority, match, actions)
+                self.add_flow(sw_dp, priority, match, actions, idle_timeout=120)
 
                 # 反向流表
                 if dscp:
@@ -178,8 +178,8 @@ class QoSController(app_manager.RyuApp):
                     match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP,
                                             ipv4_src=dst_ip, ipv4_dst=src_ip)
                 actions = [parser.OFPActionOutput(ps['in_port'])]
-                self.add_flow(sw_dp, priority, match, actions)
-                self.logger.info(f"[Flow] : -> {ps['in_port']} : {self.sw_name(ps['dpid'])} : {ps['out_port']} ->")
+                self.add_flow(sw_dp, priority, match, actions, idle_timeout=120)
+                # self.logger.info(f"[Flow] : -> {ps['in_port']} : {self.sw_name(ps['dpid'])} : {ps['out_port']} ->")
 
     def _delete_flow(self, src_ip, dst_ip, dscp=None):
         """删除指定流的流表"""
@@ -393,7 +393,7 @@ class QoSController(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions, idle_timeout=0)
 
-        for dscp in [1, 2, 3, 4]:
+        for dscp in [4, 8, 16, 32]:
             match = parser.OFPMatch(eth_type=0x0800, ip_dscp=dscp)
             actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
             self.add_flow(datapath, 100, match, actions, idle_timeout=0)
@@ -1204,19 +1204,19 @@ class QoSController(app_manager.RyuApp):
         if src not in self.graph or dst not in self.graph:
             return []
         try:
-            if dscp == 1:
+            if dscp == 4:
                 path = nx.shortest_path(self.graph, src, dst, weight='delay')
 
-            elif dscp == 2:
+            elif dscp == 8:
                 def weight_load(u, v, d):
                     bw = d.get("bw", 0.1)
                     load= d.get("total_bps", 0)
                     return 1 / (bw - load) if bw != load else 999
 
                 path = nx.shortest_path(self.graph, src, dst, weight=weight_load)
-            elif dscp == 3:
+            elif dscp == 16:
                 path = nx.shortest_path(self.graph, src, dst, weight='loss')
-            elif dscp == 4:
+            elif dscp == 32:
                 def weight_bw(u, v, d):
                     bw = d.get("bw", 0)
                     return 1.0 / (bw + 0.001)
