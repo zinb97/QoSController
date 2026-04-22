@@ -648,7 +648,6 @@ class QoSController(app_manager.RyuApp):
                 self.logger.warning(f"[Multicast Route] Cannot find source switch for IP: {src_ip}")
                 return
 
-            # todo:帮我检查一下这一段代码是否修改正确
             try:
                 # 开安装组播流规则，首先标记该组播组已安装流规则
                 self.multicast_flow_installed.add(dst_ip)
@@ -660,13 +659,18 @@ class QoSController(app_manager.RyuApp):
                     for mac, (member_ip, member_port) in mac_dict.items():
                         member_ips.append(member_ip)
 
-                self.logger.info(f"[Multicast Route] Source: {src_ip} -> SW:{src_switch_dpid}")
-                self.logger.info(f"[Multicast Route] Member Hosts in Destination Group: {member_ips}")
-                self.logger.info(f"[Multicast Route] Member Switches: {member_dpid_set}")
-
                 # 将 self.graph 转换为邻接矩阵
                 self.adj_matrix_nodes = sorted(self.graph.nodes())
+                # 构建邻接矩阵节点索引和交换机 DPID 之间的的对应关系
                 adj_matrix = nx.to_numpy_array(self.graph, nodelist=self.adj_matrix_nodes, dtype=np.float32)
+                src_switch_idx = self.adj_matrix_nodes.index(src_switch_dpid)
+                src_switch_id = src_switch_idx + 1
+                member_idx_set = [self.adj_matrix_nodes.index(dpid) for dpid in member_dpid_set]
+                member_id_list = [idx + 1 for idx in member_idx_set]
+
+                self.logger.info(f"[Multicast Route] Source: {src_ip} -> SW:{src_switch_id}")
+                self.logger.info(f"[Multicast Route] Member Hosts in Destination Group: {member_ips}")
+                self.logger.info(f"[Multicast Route] Member Switches: {member_id_list}")
 
                 netsize = len(self.adj_matrix_nodes)
 
@@ -682,10 +686,10 @@ class QoSController(app_manager.RyuApp):
                 loss_base = np.random.uniform(0.001, 0.1, (netsize, netsize))
                 loss_matrix = (loss_base + loss_base.T) / 2 * adj_matrix
 
-                # 调用智能组播路由构建算法构建组播路由
+                # 调用智能组播路由构建算法构建组播路由,  1-based:source_node,destination_group
                 is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, bandwidth_matrix, loss_matrix,
-                                                             source_node=src_switch_dpid,
-                                                             destination_group=list(member_dpid_set))
+                                                             source_node=src_switch_id,
+                                                             destination_group=member_id_list)
                 if is_success:
                     # 组播路由构建成功，安装流规则
                     # self.logger.info(f"[Multicast Route] Route Matrix:\n {route_matrix}")
@@ -722,10 +726,9 @@ class QoSController(app_manager.RyuApp):
 
                         # 如果该交换机上有组成员主机，转发到主机端口（目的交换机）
                         if src_node_dpid in member_dpid_set:
-                            for mac, (member_ip, member_port) in self.multicast_groups[dst_ip].get(src_node_dpid,
-                                                                                                   {}).items():
+                            for mac, (member_ip, member_port) in self.multicast_groups[dst_ip].get(src_node_dpid,{}).items():
                                 out_actions.append(src_parser.OFPActionOutput(member_port))
-                                self.logger.info(f"[Multicast Flow] SW:{src_node_dpid} -> host port {member_port}")
+                                self.logger.info(f"[Multicast Flow] SW:{self.sw_name(src_node_dpid)} -> host port {member_port}")
 
                         # 遍历 route_matrix[i][j] == 1，转发到下一跳交换机（源/中间交换机）
                         for j in range(netsize):
@@ -735,7 +738,7 @@ class QoSController(app_manager.RyuApp):
                                 if out_port:
                                     out_actions.append(src_parser.OFPActionOutput(out_port))
                                     self.logger.info(
-                                        f"[Multicast Flow] SW:{src_node_dpid} -> port {out_port} (next hop SW:{dst_node_dpid})")
+                                        f"[Multicast Flow] SW:{self.sw_name(src_node_dpid)} -> port {out_port} (next hop SW:{self.sw_name(dst_node_dpid)})")
 
                         if out_actions:
                             # 源交换机需要匹配 in_port + src_ip + 组播地址，其他交换机只匹配 src_ip + 组播地址
