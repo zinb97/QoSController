@@ -535,7 +535,7 @@ class QoSController(app_manager.RyuApp):
         if dst_eth not in self.hosts:
             self.send_arp_request_for_ip(datapath, src_eth, src_ip, dst_ip)
             self.logger.info(f"[ARP Flood] 模拟 {src_ip}({src_eth}) 发送 ARP 请求查询 {dst_ip}")
-            # todo 处理当前报文
+            self.flood_packet_to_all_host_ports(msg.data)
             return
 
         dst_dpid = self.hosts[dst_eth]['dpid']
@@ -567,10 +567,15 @@ class QoSController(app_manager.RyuApp):
             self.logger.warning(f"[Route] No path found from {dpid} to {dst_dpid}")
             return
 
-        self.logger.info(f"[Route] {src_ip}->{dst_ip} Path: "
-                         f"{' -> '.join(self.switch_name.get(f'{p:016x}', f'{p}') for p in path)}")
 
         path_switches = self.get_path_switches(path, src_dpid, src_port, dst_dpid, dst_port)
+
+        self.logger.info(f"{src_dpid}:{src_port} --> {dst_dpid}:{dst_port}")
+        self.logger.info(f"[Route] {src_ip}->{dst_ip} Path: "
+                         f"{' -> '.join(self.switch_name.get(f'{p:016x}', f'{p}') for p in path)}")
+        self.logger.info(f"Path switches: " +
+                         ' -> '.join(f'{p["in_port"]}:{self.sw_name(p["dpid"])}:{p["out_port"]}' for p in path_switches))
+
         self._add_path_flow(src_ip, dst_ip, dscp, path_switches)
 
         # 保存活跃流信息

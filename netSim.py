@@ -45,7 +45,7 @@ class DualSwitchTopo(Topo):
 # ==============================================================================
 class RingTopo(Topo):
     """可自定义节点数的环形拓扑"""
-    def build(self, n=5):
+    def build(self, n=6):
         switches = [self.addSwitch(f's{i}') for i in range(1, n+1)]
         # 每台交换机挂一台主机
         for i in range(n):
