@@ -393,7 +393,7 @@ class QoSController(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions, idle_timeout=0)
 
-        for dscp in [1, 2, 4, 8]:
+        for dscp in [1, 2, 3, 4]:
             match = parser.OFPMatch(eth_type=0x0800, ip_dscp=dscp)
             actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
             self.add_flow(datapath, 100, match, actions, idle_timeout=0)
@@ -1194,7 +1194,7 @@ class QoSController(app_manager.RyuApp):
 
     def get_shortest_path(self, src, dst, dscp=None):
         """使用 networkx Dijkstra 算法计算最短路径
-        dscp: 1=带宽优先, 2=时延优先, 4=丢包率优先, 8=负载优先, None=默认延迟+负载
+        dscp: 1=时延优先, 2=负载优先, 3=丢包率优先, 4=带宽优先, None=跳数
         """
         if src == dst:
             return [src]
@@ -1202,18 +1202,22 @@ class QoSController(app_manager.RyuApp):
             return None
         try:
             if dscp == 1:
+                path = nx.shortest_path(self.graph, src, dst, weight='delay')
+
+            elif dscp == 2:
+                def weight_load(u, v, d):
+                    bw = d.get("bw", 0.1)
+                    load= d.get("total_bps", 0)
+                    return 1 / (bw - load) if bw != load else 999
+
+                path = nx.shortest_path(self.graph, src, dst, weight=weight_load)
+            elif dscp == 3:
+                path = nx.shortest_path(self.graph, src, dst, weight='loss')
+            elif dscp == 4:
                 def weight_bw(u, v, d):
                     bw = d.get("bw", 0)
                     return 1.0 / (bw + 0.001)
                 path = nx.shortest_path(self.graph, src, dst, weight=weight_bw)
-            elif dscp == 2:
-                path = nx.shortest_path(self.graph, src, dst, weight='delay')
-            elif dscp == 4:
-                path = nx.shortest_path(self.graph, src, dst, weight='loss')
-            elif dscp == 8:
-                def weight_load(u, v, d):
-                    return 1.0 / (d.get("bw", 1) - d.get("total_bps", 0)) if d.get("bw", 1) != d.get("total_bps", 0) else 9999
-                path = nx.shortest_path(self.graph, src, dst, weight=weight_load)
             else:
                 path = nx.shortest_path(self.graph, src, dst)
             return path
@@ -1252,6 +1256,24 @@ class TopologyController(ControllerBase):
     @route('topology', '/topology/data', methods=['GET'])
     def get_topo_data(self, req):
         body = json.dumps(self.switch_app.topology_data, ensure_ascii=False).encode('utf-8')
+        return Response(content_type='application/json; charset=UTF-8', body=body)
+
+    @route('topology', '/flows/active', methods=['GET'])
+    def get_active_flows(self, req):
+        """获取所有活跃流"""
+        flows = []
+        for (src_ip, dst_ip, dscp), flow_info in self.switch_app.active_flows.items():
+            path_names = [self.switch_app.switch_name.get(f'{p:016x}', f'{p}') for p in flow_info['path']]
+            flows.append({
+                'src_ip': src_ip,
+                'dst_ip': dst_ip,
+                'dscp': dscp,
+                'path': path_names,
+                'path_dpids': [int(p) for p in flow_info['path']],
+                'src_host': flow_info['src_host'],
+                'dst_host': flow_info['dst_host']
+            })
+        body = json.dumps(flows, ensure_ascii=False).encode('utf-8')
         return Response(content_type='application/json; charset=UTF-8', body=body)
 
     @route('topology', '/', methods=['GET'])
