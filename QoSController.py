@@ -1,3 +1,5 @@
+from typing import List
+
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import set_ev_cls, MAIN_DISPATCHER, CONFIG_DISPATCHER
@@ -49,7 +51,7 @@ class QoSController(app_manager.RyuApp):
         self.topology_data = {"switches": [], "links": [], "hosts": []}
 
         # 活跃流表追踪
-        # {(src_ip, dst_ip): {'path': [dpid1, dpid2, ...], 'path_switches': [...], 'dscp': x}}
+        # {(src_ip, dst_ip, dscp): {'path': [dpid1, dpid2, ...], 'path_switches': [...]}}
         self.active_flows = {}
 
         # 端口统计（用于计算链路负载）
@@ -85,7 +87,7 @@ class QoSController(app_manager.RyuApp):
     def _recalculate_affected_flows(self):
         """重新计算受拓扑变化影响的流"""
         affected_flows = []
-        for (src_ip, dst_ip), flow_info in list(self.active_flows.items()):
+        for (src_ip, dst_ip, dscp), flow_info in list(self.active_flows.items()):
             path = flow_info['path']
             need_recalc = False
 
@@ -105,95 +107,78 @@ class QoSController(app_manager.RyuApp):
                         break
 
             if need_recalc:
-                affected_flows.append((src_ip, dst_ip))
+                affected_flows.append((src_ip, dst_ip, dscp))
 
         if affected_flows:
             self.logger.info(f"[Route] 需要重新计算的流: {len(affected_flows)}")
 
         # 重新计算每条受影响的流
-        for src_ip, dst_ip in affected_flows:
-            flow_info = self.active_flows.get((src_ip, dst_ip))
+        for src_ip, dst_ip, dscp in affected_flows:
+            flow_info = self.active_flows.get((src_ip, dst_ip, dscp))
             if not flow_info:
                 continue
 
-            dscp = flow_info['dscp']
             dst_host = flow_info['dst_host']
             src_host = flow_info['src_host']
 
             # 检查目的主机是否可达
             if dst_host['dpid'] not in self.datapaths:
                 self.logger.warning(f"[Route] 目的主机不可达，删除流 {src_ip} -> {dst_ip}")
-                del self.active_flows[(src_ip, dst_ip)]
+                del self.active_flows[(src_ip, dst_ip, dscp)]
                 continue
 
             # 删除旧流表
+            # todo
             self._delete_flow(src_ip, dst_ip)
 
             # 重新计算路径
             new_path = self.get_shortest_path(src_host['dpid'], dst_host['dpid'], dscp)
             if not new_path or len(new_path) < 2:
                 self.logger.warning(f"[Route] 重新计算路径失败，删除流 {src_ip} -> {dst_ip}")
-                del self.active_flows[(src_ip, dst_ip)]
+                del self.active_flows[(src_ip, dst_ip, dscp)]
                 continue
 
             self.logger.info(f"[Route] 重新计算路径: {' -> '.join(self.switch_name.get(f'{p:016x}', f'{p}') for p in new_path)}")
 
             # 重新构建 path_switches
-            path_switches = []
-            path_switches.append({
-                'dpid': src_host['dpid'],
-                'in_port': src_host['port'],
-                'out_port': self.graph[new_path[0]][new_path[1]].get("src_port"),
-            })
-            for i in range(1, len(new_path) - 1):
-                pre_sw = new_path[i - 1]
-                curr_sw = new_path[i]
-                next_sw = new_path[i + 1]
-                in_edge = self.graph[pre_sw][curr_sw]
-                out_edge = self.graph[curr_sw][next_sw]
-                path_switches.append({
-                    'dpid': curr_sw,
-                    'in_port': in_edge.get("dst_port"),
-                    'out_port': out_edge.get("src_port"),
-                })
-            path_switches.append({
-                'dpid': dst_host['dpid'],
-                'in_port': self.graph[new_path[-2]][new_path[-1]].get("dst_port"),
-                'out_port': dst_host['port'],
-            })
-
-            # 重新下发流表
-            priority = 101 if dscp else 10
-            for ps in path_switches:
-                sw_dp = self.datapaths.get(ps['dpid'])
-                if sw_dp:
-                    parser = sw_dp.ofproto_parser
-                    ofproto = sw_dp.ofproto
-
-                    if dscp:
-                        match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip, ip_dscp=dscp)
-                    else:
-                        match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
-                    actions = [parser.OFPActionOutput(ps['out_port'])]
-                    self.add_flow(sw_dp, priority, match, actions)
-
-                    # 反向流表
-                    if dscp:
-                        match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=src_ip, ip_dscp=dscp)
-                    else:
-                        match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=src_ip)
-                    actions = [parser.OFPActionOutput(ps['in_port'])]
-                    self.add_flow(sw_dp, priority, match, actions)
-
+            path_switches = self.get_path_switches(new_path, src_host['dpid'], src_host['port'],
+                                                   dst_host['dpid'], dst_host['port'])
+            self._add_path_flow(src_ip, dst_ip, dscp, path_switches)
             # 更新活跃流信息
-            self.active_flows[(src_ip, dst_ip)] = {
+            self.active_flows[(src_ip, dst_ip, dscp)] = {
                 'path': new_path,
                 'path_switches': path_switches,
-                'dscp': dscp,
                 'src_host': src_host,
                 'dst_host': dst_host
             }
-            self.logger.info(f"[Route] 流表重新下发完成: {src_ip} -> {dst_ip}")
+            self.logger.info(f"[Route] 流表重新下发完成: {src_ip} -> {dst_ip} {dscp}")
+
+    def _add_path_flow(self, src_ip, dst_ip, dscp, path_switches):
+        # 重新路径流表
+        priority = 101 if dscp else 10
+        for ps in path_switches:
+            sw_dp = self.datapaths.get(ps['dpid'])
+            if sw_dp:
+                parser = sw_dp.ofproto_parser
+                if dscp:
+                    match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP,
+                                            ipv4_src=src_ip, ipv4_dst=dst_ip, ip_dscp=dscp)
+                else:
+                    match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP,
+                                            ipv4_src=src_ip, ipv4_dst=dst_ip)
+                actions = [parser.OFPActionOutput(ps['out_port'])]
+                self.add_flow(sw_dp, priority, match, actions)
+
+                # 反向流表
+                if dscp:
+                    match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP,
+                                            ipv4_src=dst_ip, ipv4_dst=src_ip, ip_dscp=dscp)
+                else:
+                    match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP,
+                                            ipv4_src=dst_ip, ipv4_dst=src_ip)
+                actions = [parser.OFPActionOutput(ps['in_port'])]
+                self.add_flow(sw_dp, priority, match, actions)
+                self.logger.info(f"[Flow] : -> {ps['in_port']} : {self.sw_name(ps['dpid'])} : {ps['out_port']} ->")
 
     def _delete_flow(self, src_ip, dst_ip):
         """删除指定流的流表"""
@@ -207,7 +192,7 @@ class QoSController(app_manager.RyuApp):
                 parser = sw_dp.ofproto_parser
                 ofproto = sw_dp.ofproto
                 # 删除正向流
-                match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
+                match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IP, ipv4_src=src_ip, ipv4_dst=dst_ip)
                 del_flow = parser.OFPFlowMod(
                     datapath=sw_dp,
                     command=ofproto.OFPFC_DELETE,
@@ -215,11 +200,12 @@ class QoSController(app_manager.RyuApp):
                     priority=0,
                     out_port=ofproto.OFPP_ANY,
                     out_group=ofproto.OFPG_ANY,
-                    match=match
+                    match=match,
+                    # wildcards=ofproto.OFPFW_IN_PORT | ofproto.OFPFW_IP_DSCP
                 )
                 sw_dp.send_msg(del_flow)
                 # 删除反向流
-                match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IP, ipv4_dst=src_ip)
+                match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IP, ipv4_src=dst_ip, ipv4_dst=src_ip)
                 del_flow = parser.OFPFlowMod(
                     datapath=sw_dp,
                     command=ofproto.OFPFC_DELETE,
@@ -227,9 +213,39 @@ class QoSController(app_manager.RyuApp):
                     priority=0,
                     out_port=ofproto.OFPP_ANY,
                     out_group=ofproto.OFPG_ANY,
-                    match=match
+                    match=match,
+                    # wildcards=ofproto.OFPFW_IN_PORT | ofproto.OFPFW_IP_DSCP
                 )
                 sw_dp.send_msg(del_flow)
+
+    def get_path_switches(self, path, src_dpid, src_port, dst_dpid, dst_port):
+        # 构建路径上每个交换机的转发信息
+        path_switches = []
+        # 源交换机
+        path_switches.append({
+            'dpid': src_dpid,
+            'in_port': src_port,
+            'out_port': self.graph[path[0]][path[1]].get("src_port"),
+        })
+        # 中间交换机
+        for i in range(1, len(path) - 1):
+            pre_sw = path[i - 1]
+            curr_sw = path[i]
+            next_sw = path[i + 1]
+            in_edge = self.graph[pre_sw][curr_sw]
+            out_edge = self.graph[curr_sw][next_sw]
+            path_switches.append({
+                'dpid': curr_sw,
+                'in_port': in_edge.get("dst_port"),
+                'out_port': out_edge.get("src_port"),
+            })
+        # 目的交换机
+        path_switches.append({
+            'dpid': dst_dpid,
+            'in_port': self.graph[path[-2]][path[-1]].get("dst_port"),
+            'out_port': dst_port,
+        })
+        return path_switches
 
     # ==================== 拓扑事件回调 ====================
     @set_ev_cls(event.EventSwitchEnter)
@@ -476,7 +492,6 @@ class QoSController(app_manager.RyuApp):
         dst_port = self.hosts[dst_eth]['port']
         src_dpid = self.hosts[src_eth]['dpid']
         src_port = self.hosts[src_eth]['port']
-        priority = 101 if dscp else 10
 
         # 同交换机直接转发
         if dpid == dst_dpid:
@@ -502,60 +517,17 @@ class QoSController(app_manager.RyuApp):
             self.logger.warning(f"[Route] No path found from {dpid} to {dst_dpid}")
             return
 
-        self.logger.info(f"[Route] Path: {' -> '.join(self.switch_name.get(f'{p:016x}', f'{p}') for p in path)}")
+        self.logger.info(f"[Route] {src_ip}->{dst_ip} Path: "
+                         f"{' -> '.join(self.switch_name.get(f'{p:016x}', f'{p}') for p in path)}")
 
-        # 构建路径上每个交换机的转发信息
-        path_switches = []
-        # 源交换机
-        path_switches.append({
-            'dpid': src_dpid,
-            'in_port': src_port,
-            'out_port': self.graph[path[0]][path[1]].get("src_port"),
-        })
-        # 中间交换机
-        for i in range(1, len(path) - 1):
-            pre_sw = path[i - 1]
-            curr_sw = path[i]
-            next_sw = path[i + 1]
-            in_edge = self.graph[pre_sw][curr_sw]
-            out_edge = self.graph[curr_sw][next_sw]
-            path_switches.append({
-                'dpid': curr_sw,
-                'in_port': in_edge.get("dst_port"),
-                'out_port': out_edge.get("src_port"),
-            })
-        # 目的交换机
-        path_switches.append({
-            'dpid': dst_dpid,
-            'in_port': self.graph[path[-2]][path[-1]].get("dst_port"),
-            'out_port': dst_port,
-        })
-
-        # 下发正向流表 (ipv4_dst)
-        for ps in path_switches:
-            sw_dp = self.datapaths.get(ps['dpid'])
-            if sw_dp:
-                if dscp:
-                    match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip, ip_dscp=dscp)
-                else:
-                    match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
-                actions = [parser.OFPActionOutput(ps['out_port'])]
-                self.add_flow(sw_dp, priority, match, actions)
-
-                if dscp:
-                    match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=src_ip, ip_dscp=dscp)
-                else:
-                    match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=src_ip)
-                actions = [parser.OFPActionOutput(ps['in_port'])]
-                self.add_flow(sw_dp, priority, match, actions)
-                self.logger.info(f"[Flow] : -> {ps['in_port']} : {self.sw_name(ps['dpid'])} : {ps['out_port']} ->")
+        path_switches = self.get_path_switches(path, src_dpid, src_port, dst_dpid, dst_port)
+        self._add_path_flow(src_ip, dst_ip, dscp, path_switches)
 
         # 保存活跃流信息
-        flow_key = (src_ip, dst_ip)
+        flow_key = (src_ip, dst_ip, dscp)
         self.active_flows[flow_key] = {
             'path': path,
             'path_switches': path_switches,
-            'dscp': dscp,
             'src_host': {'mac': src_eth, 'dpid': src_dpid, 'port': src_port},
             'dst_host': {'mac': dst_eth, 'dpid': dst_dpid, 'port': dst_port}
         }
@@ -1132,7 +1104,7 @@ class QoSController(app_manager.RyuApp):
         return {'switches': switches, 'links': links, 'hosts': hosts}
 
     # ==================== 流表下发 ====================
-    def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=120, hard_timeout=0):
+    def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=0, hard_timeout=0):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
@@ -1148,6 +1120,7 @@ class QoSController(app_manager.RyuApp):
         datapath.send_msg(mod)
 
         # ==================== 最短路径（使用 networkx） ====================
+
     def get_shortest_path(self, src, dst, dscp=None):
         """使用 networkx Dijkstra 算法计算最短路径
         dscp: 1=带宽优先, 2=时延优先, 4=丢包率优先, 8=负载优先, None=默认延迟+负载
