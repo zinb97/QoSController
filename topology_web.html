@@ -337,6 +337,165 @@
             color: #484f58;
         }
     </style>
+
+    <!-- Switch Flow Table Modal -->
+    <style>
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal {
+            background: #1c2128;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            width: 80%;
+            max-width: 900px;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            border-bottom: 1px solid #30363d;
+        }
+
+        .modal-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+
+        .modal-title span {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: #8b949e;
+            margin-left: 8px;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: #8b949e;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1;
+        }
+
+        .modal-close:hover {
+            color: #f0f6fc;
+        }
+
+        .modal-body {
+            padding: 16px 20px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .flow-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+        }
+
+        .flow-table th {
+            text-align: left;
+            padding: 10px 8px;
+            background: #0d1117;
+            color: #8b949e;
+            font-weight: 500;
+            border-bottom: 1px solid #30363d;
+            position: sticky;
+            top: 0;
+        }
+
+        .flow-table td {
+            padding: 8px;
+            border-bottom: 1px solid #21262d;
+            color: #e6edf3;
+            vertical-align: top;
+        }
+
+        .flow-table tr:hover td {
+            background: #161b22;
+        }
+
+        .flow-table .priority {
+            color: #58a6ff;
+        }
+
+        .flow-table .match {
+            color: #a5d6ff;
+        }
+
+        .flow-table .actions {
+            color: #3fb950;
+        }
+
+        .flow-table .cookie {
+            color: #8b949e;
+        }
+
+        .flow-table .idle-timeout,
+        .flow-table .hard-timeout {
+            color: #484f58;
+        }
+
+        .flow-table .stats {
+            color: #8b949e;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #8b949e;
+        }
+
+        .error {
+            text-align: center;
+            padding: 40px;
+            color: #f85149;
+        }
+
+        .no-flows {
+            text-align: center;
+            padding: 40px;
+            color: #8b949e;
+        }
+
+        .refresh-btn {
+            background: #238636;
+            border: none;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            margin-left: 8px;
+        }
+
+        .refresh-btn:hover {
+            background: #2ea043;
+        }
+    </style>
 </head>
 <body>
     <header class="header">
@@ -496,6 +655,25 @@
         </aside>
     </main>
 
+    <!-- Switch Flow Table Modal -->
+    <div class="modal-overlay" id="flowModal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">
+                    Switch Flow Table
+                    <span id="modalSwitchDpid"></span>
+                </div>
+                <div style="display: flex; align-items: center;">
+                    <button class="refresh-btn" onclick="refreshFlowTable()">Refresh</button>
+                    <button class="modal-close" onclick="closeFlowModal()">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <div class="loading">Loading...</div>
+            </div>
+        </div>
+    </div>
+
     <script>
         var network;
         var nodes = new vis.DataSet();
@@ -573,6 +751,17 @@
             };
             network = new vis.Network(container, data, options);
 
+            // Switch node click handler
+            network.on('click', function(params) {
+                if (params.nodes.length > 0) {
+                    const clickedId = params.nodes[0];
+                    // Check if it's a switch (not a host - host IDs start with 'host_')
+                    if (!clickedId.toString().startsWith('host_')) {
+                        openFlowModal(clickedId);
+                    }
+                }
+            });
+
             // Toggle switch handler
             document.getElementById('showHosts').addEventListener('change', function(e) {
                 showHosts = e.target.checked;
@@ -634,7 +823,7 @@
             list.innerHTML = topo.switches.map(s => {
                 const levelColor = levelColors[s.level] || levelColors[3];
                 return `
-                <div class="switch-item">
+                <div class="switch-item" onclick="openFlowModal(${s.dpid})" style="cursor: pointer;">
                     <div class="switch-icon" style="background:${levelColor.bg}">⬡</div>
                     <div class="switch-info">
                         <div class="switch-name">Switch ${s.name} (L${s.level})</div>
@@ -818,6 +1007,209 @@
             updateTopology();
             setInterval(updateTopology, 2000);
         };
+
+        // Switch click handler for flow table
+        let currentSwitchDpid = null;
+
+        function openFlowModal(dpid) {
+            currentSwitchDpid = dpid;
+            document.getElementById('flowModal').classList.add('active');
+            document.getElementById('modalSwitchDpid').textContent = '0x' + dpid.toString(16).padStart(16, '0');
+            fetchFlowTable(dpid);
+        }
+
+        function closeFlowModal() {
+            document.getElementById('flowModal').classList.remove('active');
+            currentSwitchDpid = null;
+        }
+
+        function refreshFlowTable() {
+            if (currentSwitchDpid) {
+                fetchFlowTable(currentSwitchDpid);
+            }
+        }
+
+        async function fetchFlowTable(dpid) {
+            const modalBody = document.getElementById('modalBody');
+            modalBody.innerHTML = '<div class="loading">Loading...</div>';
+
+            try {
+                const response = await fetch(`/stats/flow/${dpid}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+
+                // ofctl_rest API returns {dpid: [...flows]}
+                let flows = [];
+                if (Array.isArray(data)) {
+                    flows = data;
+                } else if (data && typeof data === 'object') {
+                    // Get the first key's value (the dpid as string)
+                    const key = Object.keys(data)[0];
+                    if (key && Array.isArray(data[key])) {
+                        flows = data[key];
+                    }
+                }
+
+                if (!flows || flows.length === 0) {
+                    modalBody.innerHTML = '<div class="no-flows">No flow entries found</div>';
+                    return;
+                }
+
+                let tableHtml = `
+                    <table class="flow-table">
+                        <thead>
+                            <tr>
+                                <th>Priority</th>
+                                <th>Match</th>
+                                <th>Actions</th>
+                                <th>Duration</th>
+                                <th>Timeouts</th>
+                                <th>Stats</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+
+                flows.forEach(flow => {
+                    const priority = flow.priority || 0;
+                    const durationSec = flow.duration_sec || 0;
+                    const idleTimeout = flow.idle_timeout || 0;
+                    const hardTimeout = flow.hard_timeout || 0;
+                    const packetCount = flow.packet_count || 0;
+                    const byteCount = flow.byte_count || 0;
+
+                    // Format match fields
+                    let matchStr = '';
+                    if (flow.match) {
+                        const matchParts = [];
+                        // Handle both object format and raw format
+                        const match = flow.match;
+                        for (const [key, value] of Object.entries(match)) {
+                            if (value !== undefined && value !== null && value !== 0) {
+                                let displayValue = value;
+                                if (typeof value === 'number' && key.includes('type')) {
+                                    displayValue = '0x' + value.toString(16);
+                                }
+                                matchParts.push(`${key}=${displayValue}`);
+                            }
+                        }
+                        matchStr = matchParts.join('<br>');
+                    }
+
+                    // Format actions
+                    let actionsStr = '';
+                    if (flow.actions) {
+                        const actionParts = [];
+                        // Handle array of actions
+                        const actions = Array.isArray(flow.actions) ? flow.actions : [flow.actions];
+                        actions.forEach(action => {
+                            if (typeof action === 'object' && action !== null) {
+                                // Output action
+                                if (action.port !== undefined) {
+                                    actionParts.push(`output:${action.port}`);
+                                }
+                                // Set field actions
+                                else if (action.field) {
+                                    actionParts.push(`set_field:${JSON.stringify(action.field)}`);
+                                }
+                                // Other actions with type
+                                else if (action.type !== undefined) {
+                                    const typeNames = {
+                                        0: 'OUTPUT', 1: 'COPY_TTL_OUT', 2: 'COPY_TTL_IN',
+                                        3: 'SET_MPLS_TTL', 4: 'DEC_MPLS_TTL', 5: 'PUSH_VLAN',
+                                        6: 'POP_VLAN', 7: 'PUSH_MPLS', 8: 'POP_MPLS',
+                                        9: 'SET_QUEUE', 10: 'GROUP', 11: 'SET_FIELD',
+                                        12: 'PUSH_PBB', 13: 'SET_IPV4_SRC', 14: 'SET_IPV4_DST',
+                                        15: 'DEC_IPV4_TTL', 16: 'SET_IPV6_SRC', 17: 'SET_IPV6_DST',
+                                        18: 'DEC_IPV6_HOP', 22: 'SET_IPV6_FLABEL'
+                                    };
+                                    const typeName = typeNames[action.type] || `TYPE_${action.type}`;
+                                    // Include value if present
+                                    if (action.value !== undefined) {
+                                        actionParts.push(`${typeName}:${action.value}`);
+                                    } else {
+                                        actionParts.push(typeName);
+                                    }
+                                }
+                                // Plain object without recognized format
+                                else {
+                                    actionParts.push(JSON.stringify(action));
+                                }
+                            } else {
+                                actionParts.push(String(action));
+                            }
+                        });
+                        actionsStr = actionParts.join('<br>');
+                    } else if (flow.instructions) {
+                        // Handle instructions format
+                        const actionParts = [];
+                        const instructions = Array.isArray(flow.instructions) ? flow.instructions : [flow.instructions];
+                        instructions.forEach(inst => {
+                            if (inst.actions) {
+                                inst.actions.forEach(action => {
+                                    if (action.port !== undefined) {
+                                        actionParts.push(`output:${action.port}`);
+                                    } else {
+                                        actionParts.push(JSON.stringify(action));
+                                    }
+                                });
+                            }
+                        });
+                        actionsStr = actionParts.join('<br>');
+                    }
+
+                    tableHtml += `
+                        <tr>
+                            <td class="priority">${priority}</td>
+                            <td class="match">${matchStr || '-'}</td>
+                            <td class="actions">${actionsStr || '-'}</td>
+                            <td class="duration">${formatDuration(durationSec)}</td>
+                            <td class="timeouts">idle:${idleTimeout}<br>hard:${hardTimeout}</td>
+                            <td class="stats">pkts:${packetCount}<br>bytes:${formatBytes(byteCount)}</td>
+                        </tr>
+                    `;
+                });
+
+                tableHtml += '</tbody></table>';
+                modalBody.innerHTML = tableHtml;
+
+            } catch (error) {
+                modalBody.innerHTML = `<div class="error">Failed to load flow table:<br>${error.message}</div>`;
+            }
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function formatDuration(seconds) {
+            if (seconds < 60) return seconds + 's';
+            if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+            const hours = Math.floor(seconds / 3600);
+            const mins = Math.floor((seconds % 3600) / 60);
+            const secs = seconds % 60;
+            return hours + 'h ' + mins + 'm ' + secs + 's';
+        }
+
+        // Close modal on outside click
+        document.getElementById('flowModal').addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeFlowModal();
+            }
+        });
+
+        // Close modal on Escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && document.getElementById('flowModal').classList.contains('active')) {
+                closeFlowModal();
+            }
+        });
     </script>
 </body>
 </html>
