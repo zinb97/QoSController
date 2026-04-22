@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package multicast;
+
+message AdjacencyMatrix {
+    repeated float row = 1;
+    int32 size = 12;
+}
+
+message MulticastRequest {
+    AdjacencyMatrix adjacency_matrix = 1;
+    int32 source_node = 2;
+    repeated int32 destination_group = 3;
+    // 时延、带宽、丢包矩阵
+    AdjacencyMatrix latency_matrix = 4;
+    AdjacencyMatrix bandwidth_matrix = 5;
+    AdjacencyMatrix loss_matrix = 6;
+    // 权重参数
+    float latency_weight = 7;
+    float bandwidth_weight = 8;
+    float loss_weight = 9;
+}
+
+message MulticastResponse {
+    AdjacencyMatrix multicast_tree = 1;
+    bool success = 2;
+}
+
+service MulticastService {
+    rpc BuildMulticastTree (MulticastRequest) returns (MulticastResponse);
+}
