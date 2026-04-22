@@ -24,7 +24,7 @@ _DELAY_UNITS = {
 
 
 def get_tc_stats_optimized(dev):
-    bandwidth, delay, loss = 0, 0.0, 0.0
+    bandwidth, delay, loss = None, 0, 0
     try:
         class_output = subprocess.check_output(
             ["tc", "class", "show", "dev", dev],
@@ -41,9 +41,9 @@ def get_tc_stats_optimized(dev):
         output = class_output + "\n" + qdisc_output
         lines = output.splitlines()
     except subprocess.CalledProcessError:
-        return 0, 0.0, 0.0
+        return 0, 0, 0
     except Exception:
-        return 0, 0.0, 0.0
+        return 0, 0, 0
 
     # 2. 单次遍历同时解析所有指标
     for line in lines:
@@ -109,5 +109,5 @@ def get_switch_name():
 
 
 if __name__ == '__main__':
-    print(get_tc_stats_optimized('None-eth1'))
+    print(get_tc_stats_optimized('C1-eth1'))
     print(get_switch_name())

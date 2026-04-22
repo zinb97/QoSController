@@ -144,6 +144,36 @@
             letter-spacing: 0.5px;
             color: #484f58;
             margin-bottom: 12px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            user-select: none;
+        }
+
+        .section-title:hover {
+            color: #8b949e;
+        }
+
+        .section-title::after {
+            content: '▼';
+            font-size: 8px;
+            transition: transform 0.2s;
+        }
+
+        .section-title.collapsed::after {
+            transform: rotate(-90deg);
+        }
+
+        .sidebar-section.collapsed .section-title {
+            margin-bottom: 0;
+        }
+
+        .sidebar-section.collapsed .switch-list,
+        .sidebar-section.collapsed .legend,
+        .sidebar-section.collapsed .stats-grid,
+        .sidebar-section.collapsed .toggle-row {
+            display: none;
         }
 
         /* Stats Cards */
@@ -524,8 +554,8 @@
         </div>
 
         <aside class="sidebar">
-            <div class="sidebar-section">
-                <div class="section-title">Statistics</div>
+            <div class="sidebar-section" id="statsSection">
+                <div class="section-title" onclick="toggleSection('statsSection')">Statistics</div>
                 <div class="stats-grid">
                     <div class="stat-card">
                         <div class="stat-value" id="statSwitches">0</div>
@@ -542,8 +572,8 @@
                 </div>
             </div>
 
-            <div class="sidebar-section">
-                <div class="section-title">Legend</div>
+            <div class="sidebar-section" id="legendSection">
+                <div class="section-title" onclick="toggleSection('legendSection')">Legend</div>
                 <div class="legend">
                     <div class="legend-item">
                         <div class="legend-color switch"></div>
@@ -560,8 +590,8 @@
                 </div>
             </div>
 
-            <div class="sidebar-section">
-                <div class="section-title">Network Levels</div>
+            <div class="sidebar-section" id="levelsSection">
+                <div class="section-title" onclick="toggleSection('levelsSection')">Network Levels</div>
                 <div class="legend">
                     <div class="legend-item">
                         <div class="legend-color" style="background:#e74c3c"></div>
@@ -590,8 +620,8 @@
                 </div>
             </div>
 
-            <div class="sidebar-section">
-                <div class="section-title">Display Options</div>
+            <div class="sidebar-section" id="displaySection">
+                <div class="section-title" onclick="toggleSection('displaySection')">Display Options</div>
                 <div class="toggle-row">
                     <span class="toggle-label">Show Hosts</span>
                     <label class="toggle-switch">
@@ -629,8 +659,8 @@
                 </div>
             </div>
 
-            <div class="sidebar-section">
-                <div class="section-title">Switches</div>
+            <div class="sidebar-section" id="switchesSection">
+                <div class="section-title" onclick="toggleSection('switchesSection')">Switches</div>
                 <div class="switch-list" id="switchList">
                     <div class="switch-item">
                         <div class="switch-icon">⬡</div>
@@ -641,8 +671,8 @@
                 </div>
             </div>
 
-            <div class="sidebar-section">
-                <div class="section-title">Hosts</div>
+            <div class="sidebar-section" id="hostsSection">
+                <div class="section-title" onclick="toggleSection('hostsSection')">Hosts</div>
                 <div class="switch-list" id="hostList">
                     <div class="host-item">
                         <div class="host-icon">▣</div>
@@ -1000,6 +1030,11 @@
             } catch (e) {
                 console.log('Fetch error:', e);
             }
+        }
+
+        function toggleSection(sectionId) {
+            const section = document.getElementById(sectionId);
+            section.classList.toggle('collapsed');
         }
 
         window.onload = function() {
