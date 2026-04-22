@@ -509,9 +509,8 @@ class QoSController(app_manager.RyuApp):
 
             # todo:帮我检查一下这一段代码是否修改正确
             try:
-                # 到此处说明需要给组播组安装流规则,首先就更新multicast_flow_installed标记
+                # 开安装组播流规则，首先标记该组播组已安装流规则
                 self.multicast_flow_installed.add(dst_ip)
-
                 # 收集所有成员信息（去重）
                 member_ips = []
                 member_dpid_set = set()
@@ -548,7 +547,7 @@ class QoSController(app_manager.RyuApp):
                                                              destination_group=list(member_dpid_set))
                 if is_success:
                     # 组播路由构建成功，安装流规则
-                    self.logger.info(f"[Multicast Route] Route Matrix:\n {route_matrix}")
+                    # self.logger.info(f"[Multicast Route] Route Matrix:\n {route_matrix}")
 
                     # 将邻接矩阵的双向性变成从源到目的集合的单向性矩阵（BFS）
                     src_idx = self.adj_matrix_nodes.index(src_switch_dpid)
@@ -565,7 +564,7 @@ class QoSController(app_manager.RyuApp):
                                     queue.append(j)
                                     visited.add(j)
 
-                    self.logger.info(f"[Multicast Route] Unidirectional Route Matrix:\n {route_matrix}")
+                    # self.logger.info(f"[Multicast Route] Unidirectional Route Matrix:\n {route_matrix}")
 
                     # 根据单向性矩阵安装组播流规则
                     installed_flows = []
@@ -622,12 +621,15 @@ class QoSController(app_manager.RyuApp):
                     self.multicast_flows[dst_ip].extend(installed_flows)
                     self.logger.info(f"[Multicast Flow] Group {dst_ip} installed {len(installed_flows)} flow rules")
 
+                else:
+                    # 组播组流规则安装失败，删除 multicast_flow_installed 标记
+                    self.multicast_flow_installed.discard(dst_ip)
+                    self.logger.info(f"[Multicast Route] Route Matrix: failed")
+
             except Exception as e:
                 # 组播组流规则安装出现异常，删除 multicast_flow_installed 标记
                 self.multicast_flow_installed.discard(dst_ip)
-
-            else:
-                self.logger.info(f"[Multicast Route] Route Matrix: failed")
+                self.logger.error(f"[Multicast Route] Exception: {e}")
 
             # 转发到所有组播成员
             # self.forward_to_multicast_members(datapath, in_port, msg, dst_ip)
