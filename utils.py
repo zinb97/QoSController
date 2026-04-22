@@ -40,11 +40,11 @@ def get_tc_stats_optimized(dev):
         # 合并输出
         output = class_output + "\n" + qdisc_output
         lines = output.splitlines()
-        lines = output.splitlines()
     except subprocess.CalledProcessError:
         return None, 0.0, 0.0
     except Exception:
         print(f'{Exception}\nrun error {dev}')
+        return None, 0.0, 0.0
 
     # 2. 单次遍历同时解析所有指标
     for line in lines:
@@ -110,5 +110,5 @@ def get_switch_name():
 
 
 if __name__ == '__main__':
-    print(get_tc_stats_optimized('N1-eth1'))
+    print(get_tc_stats_optimized('None-eth1'))
     print(get_switch_name())
