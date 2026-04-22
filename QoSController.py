@@ -448,6 +448,295 @@ class QoSController(app_manager.RyuApp):
         )
         datapath.send_msg(out)
 
+    # ==================== IGMP 处理 ====================
+    def handle_igmp(self, datapath, in_port, eth, ipv4_pkt, igmp_pkt):
+        """
+        处理 IGMP 报文（加入/离开组播组），如果某组播组已安装流表，同时有组播成员加入/离开，则删除该组播组安装的所有流表
+        """
+        dpid = datapath.id
+        src_ip = ipv4_pkt.src
+        src_mac = eth.src
+        multicast_addr = igmp_pkt.address
+        msgtype = igmp_pkt.msgtype
+
+        igmp_type_names = {
+            0x11: "Membership Query",
+            0x12: "Membership Report (v1)",
+            0x16: "Membership Report (v2)",
+            0x17: "Leave Group (v2)"
+        }
+        type_name = igmp_type_names.get(msgtype, "Unknown")
+
+        self.logger.info(f"[IGMP] SW:{dpid} IGMP {type_name} from {src_ip} for group {multicast_addr}")
+
+        # 检查该组播组是否已安装过流表
+        if multicast_addr in self.multicast_flows and self.multicast_flows[multicast_addr]:
+            self.logger.info(f"[IGMP] Group {multicast_addr} has existing flow rules, deleting them first")
+            self._delete_multicast_flows(multicast_addr)
+
+        # msgtype 0x12/0x16 = Join (加入组播组)
+        if msgtype in [0x12, 0x16]:
+            self.add_member_to_group(dpid, src_mac, src_ip, multicast_addr, in_port)
+        # msgtype 0x17 = Leave (离开组播组)
+        elif msgtype == 0x17:
+            self.remove_member_from_group(dpid, src_mac, multicast_addr)
+
+    # ==================== UDP 组播处理 ====================
+    def handle_udp_multicast(self, datapath, in_port, msg, eth, ipv4_pkt, src_ip, dst_ip):
+        """
+        处理 UDP 组播报文，根据组播组成员决定是否安装流规则，控制器自身不转发组播报文
+        """
+        dpid = datapath.id
+        src_mac = eth.src
+        src_port = 0
+        dst_port = 0
+
+        self.logger.info(f"[UDP Multicast] SW:{dpid} UDP Multicast {src_ip}-->{dst_ip}")
+
+        # 检查该组播组是否有成员
+        if dst_ip in self.multicast_groups and self.multicast_groups[dst_ip]:
+            # 根据 src_ip 确定源交换机节点的 dpid
+            src_switch_dpid = self.host_ip_to_dpid.get(src_ip)
+            if not src_switch_dpid:
+                self.logger.warning(f"[Multicast Route] Cannot find source switch for IP: {src_ip}")
+                return
+
+            # 收集所有成员信息（去重）
+            member_ips = []
+            member_dpid_set = set()
+            for group_dpid, mac_dict in self.multicast_groups[dst_ip].items():
+                member_dpid_set.add(group_dpid)
+                for mac, (member_ip, member_port) in mac_dict.items():
+                    member_ips.append(member_ip)
+
+            self.logger.info(f"[Multicast Route] Source: {src_ip} -> SW:{src_switch_dpid}")
+            self.logger.info(f"[Multicast Route] Member Hosts in Destination Group: {member_ips}")
+            self.logger.info(f"[Multicast Route] Member Switches: {member_dpid_set}")
+
+            # 将 self.graph 转换为邻接矩阵
+            self.adj_matrix_nodes = sorted(self.graph.nodes())
+            adj_matrix = nx.to_numpy_array(self.graph, nodelist=self.adj_matrix_nodes, dtype=np.float32)
+
+            netsize = len(self.adj_matrix_nodes)
+
+            np.random.seed(42)
+            latency_base = np.random.uniform(1, 100, (netsize, netsize))
+            latency_matrix = (latency_base + latency_base.T) / 2 * adj_matrix
+
+            # 生成随机带宽矩阵 (对称矩阵，只看上三角)
+            bandwidth_base = np.random.uniform(10, 1000, (netsize, netsize))
+            bandwidth_matrix = (bandwidth_base + bandwidth_base.T) / 2 * adj_matrix
+
+            # 生成随机丢包矩阵 (对称矩阵，只看上三角)
+            loss_base = np.random.uniform(0.001, 0.1, (netsize, netsize))
+            loss_matrix = (loss_base + loss_base.T) / 2 * adj_matrix
+
+            # 调用智能组播路由构建算法构建组播路由
+            is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, bandwidth_matrix, loss_matrix, source_node=src_switch_dpid, destination_group=list(member_dpid_set))
+            if is_success:
+                # 组播路由构建成功，安装流规则
+                self.logger.info(f"[Multicast Route] Route Matrix:\n {route_matrix}")
+
+                # 将邻接矩阵的双向性变成从源到目的集合的单向性矩阵（BFS）
+                src_idx = self.adj_matrix_nodes.index(src_switch_dpid)
+                visited = set()
+                queue = deque([src_idx])
+                visited.add(src_idx)
+
+                while queue:
+                    i = queue.popleft()
+                    for j in range(netsize):
+                        if route_matrix[i, j] == 1:
+                            route_matrix[j, i] = 0  # 删除反向边，确保单向性
+                            if j not in visited:
+                                queue.append(j)
+                                visited.add(j)
+
+                self.logger.info(f"[Multicast Route] Unidirectional Route Matrix:\n {route_matrix}")
+
+                # 根据单向性矩阵安装组播流规则
+                installed_flows = []
+                for i in range(netsize):
+                    src_node_dpid = self.adj_matrix_nodes[i]
+                    if src_node_dpid not in self.datapaths:
+                        continue
+
+                    src_datapath = self.datapaths[src_node_dpid]
+                    src_parser = src_datapath.ofproto_parser
+
+                    # 收集该节点需要转发到的所有下一跳
+                    out_actions = []
+
+                    # 如果该交换机上有组成员主机，转发到主机端口（目的交换机）
+                    if src_node_dpid in member_dpid_set:
+                        for mac, (member_ip, member_port) in self.multicast_groups[dst_ip].get(src_node_dpid, {}).items():
+                            out_actions.append(src_parser.OFPActionOutput(member_port))
+                            self.logger.info(f"[Multicast Flow] SW:{src_node_dpid} -> host port {member_port}")
+
+                    # 遍历 route_matrix[i][j] == 1，转发到下一跳交换机（源/中间交换机）
+                    for j in range(netsize):
+                        if route_matrix[i][j] == 1:
+                            dst_node_dpid = self.adj_matrix_nodes[j]
+                            out_port = self.get_path_out_port(src_node_dpid, dst_node_dpid)
+                            if out_port:
+                                out_actions.append(src_parser.OFPActionOutput(out_port))
+                                self.logger.info(f"[Multicast Flow] SW:{src_node_dpid} -> port {out_port} (next hop SW:{dst_node_dpid})")
+
+                    if out_actions:
+                        # 源交换机需要匹配 in_port + src_ip + 组播地址，其他交换机只匹配 src_ip + 组播地址
+                        if src_node_dpid == src_switch_dpid:
+                            match = src_parser.OFPMatch(
+                                in_port=in_port,
+                                eth_type=0x0800,
+                                ipv4_src=src_ip,
+                                ipv4_dst=dst_ip
+                            )
+                        else:
+                            match = src_parser.OFPMatch(
+                                eth_type=0x0800,
+                                ipv4_src=src_ip,
+                                ipv4_dst=dst_ip
+                            )
+                        self.add_flow(src_datapath, 100, match, out_actions, idle_timeout=300, hard_timeout=0)
+                        installed_flows.append((src_node_dpid, f"ipv4_src={src_ip}, ipv4_dst={dst_ip} -> {len(out_actions)} port(s)"))
+
+                # 记录已安装的流规则
+                if dst_ip not in self.multicast_flows:
+                    self.multicast_flows[dst_ip] = []
+                self.multicast_flows[dst_ip].extend(installed_flows)
+                self.logger.info(f"[Multicast Flow] Group {dst_ip} installed {len(installed_flows)} flow rules")
+
+            else:
+                self.logger.info(f"[Multicast Route] Route Matrix: failed")
+
+            # 转发到所有组播成员
+            # self.forward_to_multicast_members(datapath, in_port, msg, dst_ip)
+        else:
+            self.logger.info(f"[UDP Multicast] Group {dst_ip} has no members, dropping packet")
+
+    def forward_to_multicast_members(self, datapath, in_port, msg, multicast_addr):
+        """
+        将组播数据转发到所有组播组成员
+        """
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        dpid = datapath.id
+
+        actions = []
+        for group_dpid, mac_dict in self.multicast_groups[multicast_addr].items():
+            for mac, (member_ip, member_port) in mac_dict.items():
+                # 只转发到同一交换机上的成员，或者通过最短路径转发到其他交换机
+                if group_dpid == dpid:
+                    actions.append(parser.OFPActionOutput(member_port))
+                else:
+                    # 跨交换机转发 - 找到到目标交换机的出端口
+                    out_port = self.get_path_out_port(dpid, group_dpid)
+                    if out_port:
+                        actions.append(parser.OFPActionOutput(out_port))
+
+        if actions:
+            out = parser.OFPPacketOut(
+                datapath=datapath,
+                buffer_id=msg.buffer_id,
+                in_port=in_port,
+                actions=actions,
+                data=msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
+            )
+            datapath.send_msg(out)
+            self.logger.info(f"[Multicast Forward] Forwarded to {len(actions)} member(s)")
+        else:
+            self.logger.info(f"[Multicast Forward] No valid path to members, dropping")
+
+    def _delete_multicast_flows(self, multicast_addr):
+        """
+        删除指定组播组的所有流表规则
+        """
+        if multicast_addr not in self.multicast_flows or not self.multicast_flows[multicast_addr]:
+            return
+
+        for dpid, match_desc in self.multicast_flows[multicast_addr]:
+            if dpid not in self.datapaths:
+                continue
+            datapath = self.datapaths[dpid]
+            ofproto = datapath.ofproto
+            parser = datapath.ofproto_parser
+
+            # 构造匹配 ipv4_dst 的 match
+            match = parser.OFPMatch(eth_type=0x0800, ipv4_dst=multicast_addr)
+            # 删除该组播组的流表
+            mod = parser.OFPFlowMod(
+                datapath=datapath,
+                command=ofproto.OFPFC_DELETE,
+                out_port=ofproto.OFPP_ANY,
+                out_group=ofproto.OFPG_ANY,
+                match=match
+            )
+            datapath.send_msg(mod)
+            self.logger.info(f"[Multicast Flow] Deleted flow on SW:{dpid} for group {multicast_addr}")
+
+        # 清空该组播组的流表记录
+        self.multicast_flows[multicast_addr] = []
+
+    # ==================== 组播组管理 ====================
+    def add_member_to_group(self, dpid, mac, src_ip, multicast_addr, in_port):
+        """
+        将主机加入组播组
+        """
+        if multicast_addr not in self.multicast_groups:
+            self.multicast_groups[multicast_addr] = {}
+
+        if dpid not in self.multicast_groups[multicast_addr]:
+            self.multicast_groups[multicast_addr][dpid] = {}
+
+        self.multicast_groups[multicast_addr][dpid][mac] = (src_ip, in_port)
+        self.logger.info(f"[Multicast Group] Host joined: Group={multicast_addr}, MAC={mac}, IP={src_ip}, SW={dpid}, Port={in_port}")
+        self.print_multicast_groups()
+
+    def remove_member_from_group(self, dpid, mac, multicast_addr):
+        """
+        将主机从组播组删除
+        """
+        if multicast_addr in self.multicast_groups:
+            if dpid in self.multicast_groups[multicast_addr]:
+                if mac in self.multicast_groups[multicast_addr][dpid]:
+                    del self.multicast_groups[multicast_addr][dpid][mac]
+                    self.logger.info(f"[Multicast Group] Host left: Group={multicast_addr}, MAC={mac}")
+
+                    # 如果该组播组在该交换机上没有成员了，删除该交换机的记录
+                    if not self.multicast_groups[multicast_addr][dpid]:
+                        del self.multicast_groups[multicast_addr][dpid]
+
+                    # 如果所有交换机都没有该组播组的成员了，删除该组播组
+                    if not self.multicast_groups[multicast_addr]:
+                        del self.multicast_groups[multicast_addr]
+                else:
+                    self.logger.info(f"[Multicast Group] Host not in group: MAC={mac}")
+            else:
+                self.logger.info(f"[Multicast Group] Switch has no members in group")
+        else:
+            self.logger.info(f"[Multicast Group] Group does not exist")
+        self.print_multicast_groups()
+
+    def print_multicast_groups(self):
+        """
+        打印当前所有组播组信息
+        """
+        self.logger.info("========== Multicast Group State ==========")
+        if not self.multicast_groups:
+            self.logger.info("  No multicast members")
+        for group, dpid_dict in self.multicast_groups.items():
+            self.logger.info(f"  Group {group}:")
+            for dpid, mac_dict in dpid_dict.items():
+                self.logger.info(f"    Switch {dpid}:")
+                for mac, (src_ip, port) in mac_dict.items():
+                    self.logger.info(f"      MAC={mac}, IP={src_ip}, Port={port}")
+        self.logger.info("=========================================")
+
+    def _is_multicast_ip(self, ip):
+        """检查是否为组播 IP 地址 (224.0.0.0 - 239.255.255.255)"""
+        ip_parts = [int(x) for x in ip.split('.')]
+        return ip_parts[0] >= 224 and ip_parts[0] <= 239
+
     # ==================== 【新增】通用主机学习函数 ====================
     def _learn_host(self, dpid, in_port, src_eth, src_ip, proto_tag=""):
         """
