@@ -78,13 +78,79 @@ class QoSController(app_manager.RyuApp):
                 self.logger.warning(f"Port stats request failed: {e}")
             hub.sleep(2)
 
-    def _request_port_stats(self):
-        """向所有交换机发送端口统计请求"""
-        for dpid, datapath in self.datapaths.items():
-            ofproto = datapath.ofproto
-            parser = datapath.ofproto_parser
-            req = parser.OFPPortStatsRequest(datapath, port_no=ofproto.OFPP_ANY)
-            datapath.send_msg(req)
+    # ==================== 拓扑事件回调 ====================
+    @set_ev_cls(event.EventSwitchEnter)
+    def switch_enter_handler(self, ev):
+        self.logger.info(f"交换机上线: DPID={ev.switch.dp.id}")
+        self.datapaths[ev.switch.dp.id] = ev.switch.dp
+        self.update_topology()
+
+    @set_ev_cls(event.EventSwitchLeave)
+    def switch_leave_handler(self, ev):
+        dpid = ev.switch.dp.id
+        self.logger.info(f"交换机离线: DPID={dpid}")
+        self.datapaths.pop(dpid, None)
+        self.update_topology()
+
+    @set_ev_cls(event.EventLinkAdd)
+    def link_add_handler(self, ev):
+        self.logger.info(f"新增链路: {ev.link.src.dpid}:{ev.link.src.port_no} <-> {ev.link.dst.dpid}:{ev.link.dst.port_no}")
+        self.update_topology()
+
+    @set_ev_cls(event.EventLinkDelete)
+    def link_delete_handler(self, ev):
+        self.logger.info(f"删除链路: {ev.link.src.dpid}:{ev.link.src.port_no} <-> {ev.link.dst.dpid}:{ev.link.dst.port_no}")
+        self.update_topology()
+
+        datapath = self.datapaths[ev.link.src.dpid]
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        match = parser.OFPMatch()  # 空匹配 = 所有流表
+        del_all = parser.OFPFlowMod(
+            datapath=datapath,
+            command=ofproto.OFPFC_DELETE,
+            table_id=0,
+            priority=0,
+            out_port=ofproto.OFPP_ANY,
+            out_group=ofproto.OFPG_ANY,
+            match=match
+        )
+        datapath.send_msg(del_all)
+
+        match1 = parser.OFPMatch(
+            eth_dst="01:80:c2:00:00:0e",
+            eth_type=0x88cc
+        )
+        actions1 = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 65535)]
+        inst1 = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions1)]
+        flow1 = parser.OFPFlowMod(
+            datapath=datapath,
+            table_id=0,
+            priority=65535,
+            match=match1,
+            instructions=inst1
+        )
+        datapath.send_msg(flow1)
+
+        match0 = parser.OFPMatch()
+        actions0 = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 65535)]
+        inst0 = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions0)]
+        flow0 = parser.OFPFlowMod(
+            datapath=datapath,
+            table_id=0,
+            priority=0,
+            match=match0,
+            instructions=inst0
+        )
+        datapath.send_msg(flow0)
+
+        self.logger.info(f"[Switch Init] Clear all flow entries on Switch {datapath.id}")
+
+    @set_ev_cls(event.EventHostAdd)
+    def host_add_handler(self, ev):
+        self.logger.info(f"主机加入: MAC={ev.host.mac}, IP={ev.host.ipv4}, Switch={ev.host.port.dpid}:{ev.host.port.port_no}")
+        self.update_topology()
 
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
@@ -131,38 +197,9 @@ class QoSController(app_manager.RyuApp):
         # 保存本次统计作为下一次的前一个
         self.port_stats_prev[dpid] = self.port_stats[dpid]
 
-    # ==================== 拓扑事件回调 ====================
-    @set_ev_cls(event.EventSwitchEnter)
-    def switch_enter_handler(self, ev):
-        self.logger.info(f"交换机上线: DPID={ev.switch.dp.id}")
-        self.datapaths[ev.switch.dp.id] = ev.switch.dp
-        self.update_topology()
-
-    @set_ev_cls(event.EventSwitchLeave)
-    def switch_leave_handler(self, ev):
-        dpid = ev.switch.dp.id
-        self.logger.info(f"交换机离线: DPID={dpid}")
-        self.datapaths.pop(dpid, None)
-        self.update_topology()
-
-    @set_ev_cls(event.EventLinkAdd)
-    def link_add_handler(self, ev):
-        self.logger.info(f"新增链路: {ev.link.src.dpid}:{ev.link.src.port_no} <-> {ev.link.dst.dpid}:{ev.link.dst.port_no}")
-        self.update_topology()
-
-    @set_ev_cls(event.EventLinkDelete)
-    def link_delete_handler(self, ev):
-        self.logger.info(f"删除链路: {ev.link.src.dpid}:{ev.link.src.port_no} <-> {ev.link.dst.dpid}:{ev.link.dst.port_no}")
-        self.update_topology()
-
-    @set_ev_cls(event.EventHostAdd)
-    def host_add_handler(self, ev):
-        self.logger.info(f"主机加入: MAC={ev.host.mac}, IP={ev.host.ipv4}, Switch={ev.host.port.dpid}:{ev.host.port.port_no}")
-        self.update_topology()
-
     # ==================== 交换机连接初始化 ====================
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
-    def switch_features_handler(self, ev):
+    def _switch_features_handler(self, ev):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -178,17 +215,20 @@ class QoSController(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions, idle_timeout=0)
 
+        for dscp in [1, 2, 4, 8]:
+            match = parser.OFPMatch(eth_type=0x0800, ip_dscp=dscp)
+            actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
+            self.add_flow(datapath, 100, match, actions, idle_timeout=0)
+
     # ==================== 核心：PacketIn 处理 ====================
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         msg = ev.msg
         datapath = msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
 
         pkt = packet.Packet(msg.data)
-        eth = pkt.get_protocols(ethernet.ethernet)[0]
+        eth = pkt.get_protocol(ethernet.ethernet)
 
         # 忽略 LLDP / IPv6
         if eth.ethertype in (ether.ETH_TYPE_LLDP, ether.ETH_TYPE_IPV6):
@@ -214,382 +254,6 @@ class QoSController(app_manager.RyuApp):
             self.handle_ipv4(datapath, in_port, msg, eth, ipv4_pkt, pkt)
             return
 
-    # ==================== 独立函数：IPv4 报文处理 ====================
-    def handle_ipv4(self, datapath, in_port, msg, eth, ipv4_pkt, pkt):
-        """
-        统一处理 IPv4 报文（TCP/UDP/ICMP）
-        """
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        dpid = datapath.id
-        src_ip = ipv4_pkt.src
-        dst_ip = ipv4_pkt.dst
-        proto = ipv4_pkt.proto
-        dst_eth, src_eth = eth.dst, eth.src
-
-        # 解析四层协议
-        tcp_pkt = pkt.get_protocol(tcp.tcp)
-        udp_pkt = pkt.get_protocol(udp.udp)
-        icmp_pkt = pkt.get_protocol(icmp.icmp)
-
-        self._learn_host(dpid, in_port, src_eth, src_ip, proto_tag="IPv4")
-
-        # 日志输出
-        if tcp_pkt:
-            src_port = tcp_pkt.src_port
-            dst_port = tcp_pkt.dst_port
-            self.logger.info(f"[PacketIn] SW:{dpid} TCP {src_ip}:{src_port}-->{dst_ip}:{dst_port}")
-        elif udp_pkt:
-            src_port = udp_pkt.src_port
-            dst_port = udp_pkt.dst_port
-            self.logger.info(f"[PacketIn] SW:{dpid} UDP {src_ip}:{src_port}-->{dst_ip}:{dst_port}")
-        elif icmp_pkt:
-            icmp_type = icmp_pkt.type
-            if icmp_type == icmp.ICMP_ECHO_REQUEST:
-                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Request {src_ip}-->{dst_ip}")
-            elif icmp_type == icmp.ICMP_ECHO_REPLY:
-                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Echo Reply {src_ip}-->{dst_ip}")
-            else:
-                self.logger.info(f"[PacketIn] SW:{dpid} ICMP Type:{icmp_type} {src_ip}-->{dst_ip}")
-        else:
-            self.logger.info(f"[PacketIn] SW:{dpid} proto:{str(proto)} {src_ip}-->{dst_ip}")
-
-        # UDP 组播报文处理
-        if udp_pkt and self._is_multicast_ip(dst_ip):
-            # 如果该组播组已经安装过流表，则丢弃；否则处理并安装流表
-            if dst_ip in self.multicast_flows and self.multicast_flows[dst_ip]:
-                self.logger.info(f"[UDP Multicast] Group {dst_ip} already has flow rules installed, dropping packet")
-                return
-            self.handle_udp_multicast(datapath, in_port, msg, eth, ipv4_pkt, src_ip, dst_ip)
-            return
-
-        # 流表匹配规则
-        flow_match = parser.OFPMatch(in_port=in_port, eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
-        if dst_ip in self.ip_to_mac:
-            dst_eth = self.ip_to_mac[dst_ip]
-
-        # 路由与转发决策
-        if dst_eth not in self.hosts:
-            self.send_arp_request_for_ip(datapath, src_eth, src_ip, dst_ip)
-            return
-
-        dst_dpid = self.hosts[dst_eth]['dpid']
-        dst_port = self.hosts[dst_eth]['port']
-
-        # 同交换机直接转发
-        if dpid == dst_dpid:
-            out_port = dst_port
-            actions = [parser.OFPActionOutput(out_port)]
-        else:
-            # 跨交换机最短路径
-            out_port = self.get_path_out_port(dpid, dst_dpid)
-            if not out_port:
-                return
-            actions = [parser.OFPActionOutput(out_port)]
-
-        # 下发流表
-        if out_port != ofproto.OFPP_FLOOD and flow_match:
-            buffer_id = msg.buffer_id if msg.buffer_id != ofproto.OFP_NO_BUFFER else None
-            self.add_flow(datapath, 1, flow_match, actions, buffer_id)
-
-        # 发送当前报文
-        data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
-        out = parser.OFPPacketOut(
-            datapath=datapath, buffer_id=msg.buffer_id,
-            in_port=in_port, actions=actions, data=data
-        )
-        datapath.send_msg(out)
-
-    def _delete_multicast_flows(self, multicast_addr):
-        """
-        删除指定组播组的所有流表规则
-        """
-        if multicast_addr not in self.multicast_flows or not self.multicast_flows[multicast_addr]:
-            return
-
-        for dpid, match_desc in self.multicast_flows[multicast_addr]:
-            if dpid not in self.datapaths:
-                continue
-            datapath = self.datapaths[dpid]
-            ofproto = datapath.ofproto
-            parser = datapath.ofproto_parser
-
-            # 构造匹配 ipv4_dst 的 match
-            match = parser.OFPMatch(eth_type=0x0800, ipv4_dst=multicast_addr)
-            # 删除该组播组的流表
-            mod = parser.OFPFlowMod(
-                datapath=datapath,
-                command=ofproto.OFPFC_DELETE,
-                out_port=ofproto.OFPP_ANY,
-                out_group=ofproto.OFPG_ANY,
-                match=match
-            )
-            datapath.send_msg(mod)
-            self.logger.info(f"[Multicast Flow] Deleted flow on SW:{dpid} for group {multicast_addr}")
-
-        # 清空该组播组的流表记录
-        self.multicast_flows[multicast_addr] = []
-
-    # ==================== IGMP 处理 ====================
-    def handle_igmp(self, datapath, in_port, eth, ipv4_pkt, igmp_pkt):
-        """
-        处理 IGMP 报文（加入/离开组播组），如果某组播组已安装流表，同时有组播成员加入/离开，则删除该组播组安装的所有流表
-        """
-        dpid = datapath.id
-        src_ip = ipv4_pkt.src
-        src_mac = eth.src
-        multicast_addr = igmp_pkt.address
-        msgtype = igmp_pkt.msgtype
-
-        igmp_type_names = {
-            0x11: "Membership Query",
-            0x12: "Membership Report (v1)",
-            0x16: "Membership Report (v2)",
-            0x17: "Leave Group (v2)"
-        }
-        type_name = igmp_type_names.get(msgtype, "Unknown")
-
-        self.logger.info(f"[IGMP] SW:{dpid} IGMP {type_name} from {src_ip} for group {multicast_addr}")
-
-        # 检查该组播组是否已安装过流表
-        if multicast_addr in self.multicast_flows and self.multicast_flows[multicast_addr]:
-            self.logger.info(f"[IGMP] Group {multicast_addr} has existing flow rules, deleting them first")
-            self._delete_multicast_flows(multicast_addr)
-
-        # msgtype 0x12/0x16 = Join (加入组播组)
-        if msgtype in [0x12, 0x16]:
-            self.add_member_to_group(dpid, src_mac, src_ip, multicast_addr, in_port)
-        # msgtype 0x17 = Leave (离开组播组)
-        elif msgtype == 0x17:
-            self.remove_member_from_group(dpid, src_mac, multicast_addr)
-
-    # ==================== UDP 组播处理 ====================
-    def handle_udp_multicast(self, datapath, in_port, msg, eth, ipv4_pkt, src_ip, dst_ip):
-        """
-        处理 UDP 组播报文，根据组播组成员决定是否安装流规则，控制器自身不转发组播报文
-        """
-        dpid = datapath.id
-        src_mac = eth.src
-        src_port = 0
-        dst_port = 0
-
-        self.logger.info(f"[UDP Multicast] SW:{dpid} UDP Multicast {src_ip}-->{dst_ip}")
-
-        # 检查该组播组是否有成员
-        if dst_ip in self.multicast_groups and self.multicast_groups[dst_ip]:
-            # 根据 src_ip 确定源交换机节点的 dpid
-            src_switch_dpid = self.host_ip_to_dpid.get(src_ip)
-            if not src_switch_dpid:
-                self.logger.warning(f"[Multicast Route] Cannot find source switch for IP: {src_ip}")
-                return
-
-            # 收集所有成员信息（去重）
-            member_ips = []
-            member_dpid_set = set()
-            for group_dpid, mac_dict in self.multicast_groups[dst_ip].items():
-                member_dpid_set.add(group_dpid)
-                for mac, (member_ip, member_port) in mac_dict.items():
-                    member_ips.append(member_ip)
-
-            self.logger.info(f"[Multicast Route] Source: {src_ip} -> SW:{src_switch_dpid}")
-            self.logger.info(f"[Multicast Route] Member Hosts in Destination Group: {member_ips}")
-            self.logger.info(f"[Multicast Route] Member Switches: {member_dpid_set}")
-
-            # 将 self.graph 转换为邻接矩阵
-            self.adj_matrix_nodes = sorted(self.graph.nodes())
-            adj_matrix = nx.to_numpy_array(self.graph, nodelist=self.adj_matrix_nodes, dtype=np.float32)
-
-            netsize = len(self.adj_matrix_nodes)
-
-            np.random.seed(42)
-            latency_base = np.random.uniform(1, 100, (netsize, netsize))
-            latency_matrix = (latency_base + latency_base.T) / 2 * adj_matrix
-
-            # 生成随机带宽矩阵 (对称矩阵，只看上三角)
-            bandwidth_base = np.random.uniform(10, 1000, (netsize, netsize))
-            bandwidth_matrix = (bandwidth_base + bandwidth_base.T) / 2 * adj_matrix
-
-            # 生成随机丢包矩阵 (对称矩阵，只看上三角)
-            loss_base = np.random.uniform(0.001, 0.1, (netsize, netsize))
-            loss_matrix = (loss_base + loss_base.T) / 2 * adj_matrix
-
-            # 调用智能组播路由构建算法构建组播路由
-            is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, bandwidth_matrix, loss_matrix, source_node=src_switch_dpid, destination_group=list(member_dpid_set))
-            if is_success:
-                # 组播路由构建成功，安装流规则
-                self.logger.info(f"[Multicast Route] Route Matrix:\n {route_matrix}")
-
-                # 将邻接矩阵的双向性变成从源到目的集合的单向性矩阵（BFS）
-                src_idx = self.adj_matrix_nodes.index(src_switch_dpid)
-                visited = set()
-                queue = deque([src_idx])
-                visited.add(src_idx)
-
-                while queue:
-                    i = queue.popleft()
-                    for j in range(netsize):
-                        if route_matrix[i, j] == 1:
-                            route_matrix[j, i] = 0  # 删除反向边，确保单向性
-                            if j not in visited:
-                                queue.append(j)
-                                visited.add(j)
-
-                self.logger.info(f"[Multicast Route] Unidirectional Route Matrix:\n {route_matrix}")
-
-                # 根据单向性矩阵安装组播流规则
-                installed_flows = []
-                for i in range(netsize):
-                    src_node_dpid = self.adj_matrix_nodes[i]
-                    if src_node_dpid not in self.datapaths:
-                        continue
-
-                    src_datapath = self.datapaths[src_node_dpid]
-                    src_parser = src_datapath.ofproto_parser
-
-                    # 收集该节点需要转发到的所有下一跳
-                    out_actions = []
-
-                    # 如果该交换机上有组成员主机，转发到主机端口（目的交换机）
-                    if src_node_dpid in member_dpid_set:
-                        for mac, (member_ip, member_port) in self.multicast_groups[dst_ip].get(src_node_dpid, {}).items():
-                            out_actions.append(src_parser.OFPActionOutput(member_port))
-                            self.logger.info(f"[Multicast Flow] SW:{src_node_dpid} -> host port {member_port}")
-
-                    # 遍历 route_matrix[i][j] == 1，转发到下一跳交换机（源/中间交换机）
-                    for j in range(netsize):
-                        if route_matrix[i][j] == 1:
-                            dst_node_dpid = self.adj_matrix_nodes[j]
-                            out_port = self.get_path_out_port(src_node_dpid, dst_node_dpid)
-                            if out_port:
-                                out_actions.append(src_parser.OFPActionOutput(out_port))
-                                self.logger.info(f"[Multicast Flow] SW:{src_node_dpid} -> port {out_port} (next hop SW:{dst_node_dpid})")
-
-                    if out_actions:
-                        # 源交换机需要匹配 in_port + src_ip + 组播地址，其他交换机只匹配 src_ip + 组播地址
-                        if src_node_dpid == src_switch_dpid:
-                            match = src_parser.OFPMatch(
-                                in_port=in_port,
-                                eth_type=0x0800,
-                                ipv4_src=src_ip,
-                                ipv4_dst=dst_ip
-                            )
-                        else:
-                            match = src_parser.OFPMatch(
-                                eth_type=0x0800,
-                                ipv4_src=src_ip,
-                                ipv4_dst=dst_ip
-                            )
-                        self.add_flow(src_datapath, 100, match, out_actions, idle_timeout=300, hard_timeout=0)
-                        installed_flows.append((src_node_dpid, f"ipv4_src={src_ip}, ipv4_dst={dst_ip} -> {len(out_actions)} port(s)"))
-
-                # 记录已安装的流规则
-                if dst_ip not in self.multicast_flows:
-                    self.multicast_flows[dst_ip] = []
-                self.multicast_flows[dst_ip].extend(installed_flows)
-                self.logger.info(f"[Multicast Flow] Group {dst_ip} installed {len(installed_flows)} flow rules")
-
-            else:
-                self.logger.info(f"[Multicast Route] Route Matrix: failed")
-
-            # 转发到所有组播成员
-            # self.forward_to_multicast_members(datapath, in_port, msg, dst_ip)
-        else:
-            self.logger.info(f"[UDP Multicast] Group {dst_ip} has no members, dropping packet")
-
-    def forward_to_multicast_members(self, datapath, in_port, msg, multicast_addr):
-        """
-        将组播数据转发到所有组播组成员
-        """
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        dpid = datapath.id
-
-        actions = []
-        for group_dpid, mac_dict in self.multicast_groups[multicast_addr].items():
-            for mac, (member_ip, member_port) in mac_dict.items():
-                # 只转发到同一交换机上的成员，或者通过最短路径转发到其他交换机
-                if group_dpid == dpid:
-                    actions.append(parser.OFPActionOutput(member_port))
-                else:
-                    # 跨交换机转发 - 找到到目标交换机的出端口
-                    out_port = self.get_path_out_port(dpid, group_dpid)
-                    if out_port:
-                        actions.append(parser.OFPActionOutput(out_port))
-
-        if actions:
-            out = parser.OFPPacketOut(
-                datapath=datapath,
-                buffer_id=msg.buffer_id,
-                in_port=in_port,
-                actions=actions,
-                data=msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
-            )
-            datapath.send_msg(out)
-            self.logger.info(f"[Multicast Forward] Forwarded to {len(actions)} member(s)")
-        else:
-            self.logger.info(f"[Multicast Forward] No valid path to members, dropping")
-
-    def _is_multicast_ip(self, ip):
-        """检查是否为组播 IP 地址 (224.0.0.0 - 239.255.255.255)"""
-        ip_parts = [int(x) for x in ip.split('.')]
-        return ip_parts[0] >= 224 and ip_parts[0] <= 239
-
-    # ==================== 组播组管理 ====================
-    def add_member_to_group(self, dpid, mac, src_ip, multicast_addr, in_port):
-        """
-        将主机加入组播组
-        """
-        if multicast_addr not in self.multicast_groups:
-            self.multicast_groups[multicast_addr] = {}
-
-        if dpid not in self.multicast_groups[multicast_addr]:
-            self.multicast_groups[multicast_addr][dpid] = {}
-
-        self.multicast_groups[multicast_addr][dpid][mac] = (src_ip, in_port)
-        self.logger.info(f"[Multicast Group] Host joined: Group={multicast_addr}, MAC={mac}, IP={src_ip}, SW={dpid}, Port={in_port}")
-        self.print_multicast_groups()
-
-    def remove_member_from_group(self, dpid, mac, multicast_addr):
-        """
-        将主机从组播组删除
-        """
-        if multicast_addr in self.multicast_groups:
-            if dpid in self.multicast_groups[multicast_addr]:
-                if mac in self.multicast_groups[multicast_addr][dpid]:
-                    del self.multicast_groups[multicast_addr][dpid][mac]
-                    self.logger.info(f"[Multicast Group] Host left: Group={multicast_addr}, MAC={mac}")
-
-                    # 如果该组播组在该交换机上没有成员了，删除该交换机的记录
-                    if not self.multicast_groups[multicast_addr][dpid]:
-                        del self.multicast_groups[multicast_addr][dpid]
-
-                    # 如果所有交换机都没有该组播组的成员了，删除该组播组
-                    if not self.multicast_groups[multicast_addr]:
-                        del self.multicast_groups[multicast_addr]
-                else:
-                    self.logger.info(f"[Multicast Group] Host not in group: MAC={mac}")
-            else:
-                self.logger.info(f"[Multicast Group] Switch has no members in group")
-        else:
-            self.logger.info(f"[Multicast Group] Group does not exist")
-        self.print_multicast_groups()
-
-    def print_multicast_groups(self):
-        """
-        打印当前所有组播组信息
-        """
-        self.logger.info("========== Multicast Group State ==========")
-        if not self.multicast_groups:
-            self.logger.info("  No multicast members")
-        for group, dpid_dict in self.multicast_groups.items():
-            self.logger.info(f"  Group {group}:")
-            for dpid, mac_dict in dpid_dict.items():
-                self.logger.info(f"    Switch {dpid}:")
-                for mac, (src_ip, port) in mac_dict.items():
-                    self.logger.info(f"      MAC={mac}, IP={src_ip}, Port={port}")
-        self.logger.info("=========================================")
-
-
     # ==================== ARP 处理 ====================
     def handle_arp(self, datapath, in_port, msg, eth_pkt, arp_pkt):
         dpid = datapath.id
@@ -606,7 +270,6 @@ class QoSController(app_manager.RyuApp):
         if arp_htype != 1 or arp_ptype != 0x0800:
             self.logger.debug(f"[PacketIn] 非以太网IPv4 ARP，忽略: HTYPE={arp_htype}, PTYPE={hex(arp_ptype)}")
             return
-
         self.logger.info(f"[PacketIn] SW:{dpid} {arp_op_name} ETH:{src_eth}-->{dst_eth} | ARP:{src_mac}({src_ip_arp})-->{dst_mac}({dst_ip_arp})")
 
         self._learn_host(dpid, in_port, src_eth, src_ip_arp, proto_tag="ARP")
@@ -615,11 +278,11 @@ class QoSController(app_manager.RyuApp):
         if arp_opcode == arp.ARP_REQUEST:
             if dst_ip_arp in self.ip_to_mac:
                 target_mac = self.ip_to_mac[dst_ip_arp]
-                self.send_arp_reply(datapath, eth_pkt, arp_pkt, src_mac, src_ip_arp, target_mac, dst_ip_arp, in_port)
+                self.send_arp_reply(datapath, eth_pkt, src_mac, src_ip_arp, target_mac, dst_ip_arp, in_port)
                 self.logger.info(f"[ARP Reply] SW:{dpid} Reply {dst_ip_arp} is {target_mac}")
             else:
                 self.flood_arp_to_all_switches(msg.data)
-                self.logger.info(f"[ARP Flood] 未知IP {dst_ip_arp}，控制器向全网泛洪")
+                self.logger.info(f"[ARP Flood] unknown IP {dst_ip_arp}")
 
         # ARP 响应
         elif arp_opcode == arp.ARP_REPLY:
@@ -629,11 +292,161 @@ class QoSController(app_manager.RyuApp):
                 if target_dpid in self.datapaths:
                     target_dp = self.datapaths[target_dpid]
                     self.send_packet_out(target_dp, target_port, msg.data)
-                    self.logger.info(f"[ARP Forward] 控制器转发ARP Reply → Host {dst_mac} (SW:{target_dpid}, Port:{target_port})")
+                    self.logger.info(f"[ARP Forward] ARP Reply → Host {dst_mac} (SW:{target_dpid}, Port:{target_port})")
                 else:
                     self.logger.warning(f"[ARP Forward] 目标交换机不存在: {target_dpid}")
             else:
                 self.logger.warning(f"[ARP Forward] 未知目标主机: {dst_mac}，丢弃")
+
+    # ==================== IPv4 报文处理 ====================
+    def handle_ipv4(self, datapath, in_port, msg, eth, ipv4_pkt, pkt):
+        """
+        统一处理 IPv4 报文（TCP/UDP/ICMP）
+        """
+        ofproto, parser = datapath.ofproto, datapath.ofproto_parser
+        dpid = datapath.id
+        sw_name = self.switch_name.get(f'{dpid:016x}', f"{dpid}")
+        dst_eth, src_eth = eth.dst, eth.src
+        src_ip, dst_ip = ipv4_pkt.src, ipv4_pkt.dst
+        proto = ipv4_pkt.proto
+        tos = ipv4_pkt.tos
+        dscp = tos >> 2
+
+        # 解析四层协议
+        tcp_pkt = pkt.get_protocol(tcp.tcp)
+        udp_pkt = pkt.get_protocol(udp.udp)
+        icmp_pkt = pkt.get_protocol(icmp.icmp)
+
+        self._learn_host(dpid, in_port, src_eth, src_ip, proto_tag="IPv4")
+
+        # 日志输出
+        if tcp_pkt:
+            src_port = tcp_pkt.src_port
+            dst_port = tcp_pkt.dst_port
+            self.logger.info(f"[PacketIn] SW:{sw_name} TCP {src_ip}:{src_port}-->{dst_ip}:{dst_port} {dscp if dscp else ''}")
+        elif udp_pkt:
+            src_port = udp_pkt.src_port
+            dst_port = udp_pkt.dst_port
+            self.logger.info(f"[PacketIn] SW:{sw_name} UDP {src_ip}:{src_port}-->{dst_ip}:{dst_port} {dscp if dscp else ''}")
+        elif icmp_pkt:
+            icmp_type = icmp_pkt.type
+            if icmp_type == icmp.ICMP_ECHO_REQUEST:
+                self.logger.info(f"[PacketIn] SW:{sw_name} ICMP Echo Request {src_ip}-->{dst_ip} {dscp if dscp else ''}")
+            elif icmp_type == icmp.ICMP_ECHO_REPLY:
+                self.logger.info(f"[PacketIn] SW:{sw_name} ICMP Echo Reply {src_ip}-->{dst_ip} {dscp if dscp else ''}")
+            else:
+                self.logger.info(f"[PacketIn] SW:{sw_name} ICMP Type:{icmp_type} {src_ip}-->{dst_ip} {dscp if dscp else ''}")
+        else:
+            self.logger.info(f"[PacketIn] SW:{sw_name} proto:{str(proto)} {src_ip}-->{dst_ip} {dscp if dscp else ''}")
+
+        # UDP 组播报文处理
+        if udp_pkt and self._is_multicast_ip(dst_ip):
+            # 如果该组播组已经安装过流表，则丢弃；否则处理并安装流表
+            if dst_ip in self.multicast_flows and self.multicast_flows[dst_ip]:
+                self.logger.info(f"[UDP Multicast] Group {dst_ip} already has flow rules installed, dropping packet")
+                return
+            self.handle_udp_multicast(datapath, in_port, msg, eth, ipv4_pkt, src_ip, dst_ip)
+            return
+
+        if dst_ip in self.ip_to_mac:
+            dst_eth = self.ip_to_mac[dst_ip]
+        else:
+            self.logger.info(f"[PacketIn] SW:{sw_name} {dst_ip} not in ip_to_mac")
+
+        # 路由与转发决策
+        if dst_eth not in self.hosts:
+            self.send_arp_request_for_ip(datapath, src_eth, src_ip, dst_ip)
+            self.logger.info(f"[ARP Flood] 模拟 {src_ip}({src_eth}) 发送 ARP 请求查询 {dst_ip}")
+            # todo 处理当前报文
+            return
+
+        dst_dpid = self.hosts[dst_eth]['dpid']
+        dst_port = self.hosts[dst_eth]['port']
+        src_dpid = self.hosts[src_eth]['dpid']
+        src_port = self.hosts[src_eth]['port']
+        priority = 101 if dscp else 10
+
+        # 同交换机直接转发
+        if dpid == dst_dpid:
+            # 流表匹配规则
+            flow_match = parser.OFPMatch(in_port=in_port, eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
+            out_port = dst_port
+            actions = [parser.OFPActionOutput(out_port)]
+            # 下发流表
+            if flow_match:
+                self.add_flow(datapath, 101, flow_match, actions)
+            # 发送当前报文
+            data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
+            out = parser.OFPPacketOut(
+                datapath=datapath, buffer_id=msg.buffer_id,
+                in_port=in_port, actions=actions, data=data
+            )
+            datapath.send_msg(out)
+            return
+
+        # 跨交换机：计算完整路径并下发双向流表
+        path = self.get_shortest_path(dpid, dst_dpid, dscp)
+        if not path or len(path) < 2:
+            self.logger.warning(f"[Route] No path found from {dpid} to {dst_dpid}")
+            return
+
+        self.logger.info(f"[Route] Path: {' -> '.join(self.switch_name.get(f'{p:016x}', f'{p}') for p in path)}")
+
+        # 构建路径上每个交换机的转发信息
+        path_switches = []
+        # 源交换机
+        path_switches.append({
+            'dpid': src_dpid,
+            'in_port': src_port,
+            'out_port': self.graph[path[0]][path[1]].get("src_port"),
+        })
+        # 中间交换机
+        for i in range(1, len(path) - 1):
+            pre_sw = path[i - 1]
+            curr_sw = path[i]
+            next_sw = path[i + 1]
+            in_edge = self.graph[pre_sw][curr_sw]
+            out_edge = self.graph[curr_sw][next_sw]
+            path_switches.append({
+                'dpid': curr_sw,
+                'in_port': in_edge.get("dst_port"),
+                'out_port': out_edge.get("src_port"),
+            })
+        # 目的交换机
+        path_switches.append({
+            'dpid': dst_dpid,
+            'in_port': self.graph[path[-2]][path[-1]].get("dst_port"),
+            'out_port': dst_port,
+        })
+
+        # 下发正向流表 (ipv4_dst)
+        for ps in path_switches:
+            sw_dp = self.datapaths.get(ps['dpid'])
+            if sw_dp:
+                if dscp:
+                    match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip, ip_dscp=dscp)
+                else:
+                    match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=dst_ip)
+                actions = [parser.OFPActionOutput(ps['out_port'])]
+                self.add_flow(sw_dp, priority, match, actions)
+                self.logger.info(f"[Flow] {self.sw_name(ps['dpid'])}: {ps['in_port']} -> {ps['out_port']} (dst={dst_ip})")
+
+                if dscp:
+                    match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=src_ip, ip_dscp=dscp)
+                else:
+                    match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP, ipv4_dst=src_ip)
+                actions = [parser.OFPActionOutput(ps['in_port'])]
+                self.add_flow(sw_dp, priority, match, actions)
+                self.logger.info(f"[Flow] {self.sw_name(ps['dpid'])}: {ps['out_port']} -> {ps['in_port']} (dst={src_ip})")
+
+        # 发送当前报文
+        out_port = path_switches[0]['out_port']
+        data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
+        out = parser.OFPPacketOut(
+            datapath=datapath, buffer_id=msg.buffer_id,
+            in_port=in_port, actions=[parser.OFPActionOutput(out_port)], data=data
+        )
+        datapath.send_msg(out)
 
     # ==================== 【新增】通用主机学习函数 ====================
     def _learn_host(self, dpid, in_port, src_eth, src_ip, proto_tag=""):
@@ -680,18 +493,15 @@ class QoSController(app_manager.RyuApp):
 
             self.ip_to_mac[src_ip] = src_eth
 
-    def send_arp_reply(self, datapath, eth_pkt, arp_pkt, src_mac, src_ip, dst_mac, dst_ip, in_port):
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-
+    def send_arp_reply(self, datapath, eth_pkt, src_mac, src_ip, dst_mac, dst_ip, in_port):
         pkt = packet.Packet()
         pkt.add_protocol(ethernet.ethernet(ethertype=eth_pkt.ethertype, src=dst_mac, dst=src_mac))
         pkt.add_protocol(arp.arp(opcode=arp.ARP_REPLY, src_mac=dst_mac, src_ip=dst_ip, dst_mac=src_mac, dst_ip=src_ip))
         pkt.serialize()
-
         self.send_packet_out(datapath, in_port, pkt.data)
 
     def send_packet_out(self, datapath, port, pkt_data):
+        # 向交换机发送指令，令交换机从指定端口发送数据包
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         actions = [parser.OFPActionOutput(port)]
@@ -709,9 +519,6 @@ class QoSController(app_manager.RyuApp):
         :param src_ip: 源主机 IP
         :param target_ip: 需要查询的目标 IP
         """
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-
         # 构造 ARP 请求报文
         pkt = packet.Packet()
         # 1. 以太网头：广播地址
@@ -729,8 +536,6 @@ class QoSController(app_manager.RyuApp):
             dst_ip=target_ip
         ))
         pkt.serialize()
-
-        self.logger.info(f"[ARP Probe] 模拟 {src_ip}({src_mac}) 发送 ARP 请求查询 {target_ip}")
         # 调用通用泛洪函数发送
         self.flood_packet_to_all_host_ports(pkt.data)
 
@@ -917,35 +722,53 @@ class QoSController(app_manager.RyuApp):
         return {'switches': switches, 'links': links, 'hosts': hosts}
 
     # ==================== 流表下发 ====================
-    def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=30, hard_timeout=0):
+    def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=120, hard_timeout=0):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
 
         if buffer_id:
             mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id, priority=priority,
-                                    match=match, instructions=inst, idle_timeout=idle_timeout, hard_timeout=hard_timeout)
+                                    match=match, instructions=inst,
+                                    idle_timeout=idle_timeout, hard_timeout=hard_timeout)
         else:
             mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
-                                    match=match, instructions=inst, idle_timeout=idle_timeout, hard_timeout=hard_timeout)
+                                    match=match, instructions=inst,
+                                    idle_timeout=idle_timeout, hard_timeout=hard_timeout)
         datapath.send_msg(mod)
 
         # ==================== 最短路径（使用 networkx） ====================
-    def get_shortest_path(self, src, dst):
-        """使用 networkx Dijkstra 算法计算最短路径"""
+    def get_shortest_path(self, src, dst, dscp=None):
+        """使用 networkx Dijkstra 算法计算最短路径
+        dscp: 1=带宽优先, 2=时延优先, 4=丢包率优先, 8=负载优先, None=默认延迟+负载
+        """
         if src == dst:
             return [src]
         if src not in self.graph or dst not in self.graph:
             return None
         try:
-            path = nx.shortest_path(self.graph, src, dst)
+            if dscp == 1:
+                def weight_bw(u, v, d):
+                    bw = d.get("bw", 0)
+                    return 1.0 / (bw + 0.001)
+                path = nx.shortest_path(self.graph, src, dst, weight=weight_bw)
+            elif dscp == 2:
+                path = nx.shortest_path(self.graph, src, dst, weight='delay')
+            elif dscp == 4:
+                path = nx.shortest_path(self.graph, src, dst, weight='loss')
+            elif dscp == 8:
+                def weight_load(u, v, d):
+                    return 1.0 / (d.get("bw", 1) - d.get("total_bps", 0)) if d.get("bw", 1) != d.get("total_bps", 0) else 9999
+                path = nx.shortest_path(self.graph, src, dst, weight=weight_load)
+            else:
+                path = nx.shortest_path(self.graph, src, dst)
             return path
         except nx.NetworkXNoPath:
             return None
 
-    def get_path_out_port(self, src, dst):
+    def get_path_out_port(self, src, dst, dscp=None):
         """获取最短路径上下一个交换机的出端口"""
-        path = self.get_shortest_path(src, dst)
+        path = self.get_shortest_path(src, dst, dscp)
         if not path or len(path) <= 1:
             return None
         next_hop = path[1]
@@ -953,6 +776,17 @@ class QoSController(app_manager.RyuApp):
         if self.graph.has_edge(src, next_hop):
             return self.graph[src][next_hop].get('src_port')
         return None
+
+    def _request_port_stats(self):
+        """向所有交换机发送端口统计请求"""
+        for dpid, datapath in self.datapaths.items():
+            ofproto = datapath.ofproto
+            parser = datapath.ofproto_parser
+            req = parser.OFPPortStatsRequest(datapath, port_no=ofproto.OFPP_ANY)
+            datapath.send_msg(req)
+
+    def sw_name(self, dpid):
+        return f'{self.switch_name.get(f"{dpid:016x}", dpid)}'
 
 
 # ===================== Web 服务 =====================
