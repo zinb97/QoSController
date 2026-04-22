@@ -760,7 +760,7 @@ class QoSController(app_manager.RyuApp):
                                     ipv4_src=src_ip,
                                     ipv4_dst=dst_ip
                                 )
-                            self.add_flow(src_datapath, 100, match, out_actions, idle_timeout=300, hard_timeout=0)
+                            self.add_flow(src_datapath, 100, match, out_actions, idle_timeout=0, hard_timeout=0)
                             installed_flows.append(
                                 (src_node_dpid, f"ipv4_src={src_ip}, ipv4_dst={dst_ip} -> {len(out_actions)} port(s)"))
 
