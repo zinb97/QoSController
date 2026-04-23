@@ -1205,22 +1205,21 @@ class QoSController(app_manager.RyuApp):
             return []
         try:
             if dscp == 4:
-                path = nx.shortest_path(self.graph, src, dst, weight='delay')
-
+                def weight_bw(u, v, d):
+                    bw = d.get("bw", 0)
+                    return 1.0 / (bw + 0.001)
+                path = nx.shortest_path(self.graph, src, dst, weight=weight_bw)
             elif dscp == 8:
+                path = nx.shortest_path(self.graph, src, dst, weight='loss')
+            elif dscp == 16:
                 def weight_load(u, v, d):
                     bw = d.get("bw", 0.1)
                     load= d.get("total_bps", 0)
                     return 1 / (bw - load) if bw != load else 999
 
                 path = nx.shortest_path(self.graph, src, dst, weight=weight_load)
-            elif dscp == 16:
-                path = nx.shortest_path(self.graph, src, dst, weight='loss')
             elif dscp == 32:
-                def weight_bw(u, v, d):
-                    bw = d.get("bw", 0)
-                    return 1.0 / (bw + 0.001)
-                path = nx.shortest_path(self.graph, src, dst, weight=weight_bw)
+                path = nx.shortest_path(self.graph, src, dst, weight='delay')
             else:
                 path = nx.shortest_path(self.graph, src, dst)
             return path

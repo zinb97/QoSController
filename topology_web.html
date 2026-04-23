@@ -913,7 +913,7 @@
                     `;
                 } else {
                     flowList.innerHTML = flows.map(f => {
-                        const dscpName = {1: 'Delay', 2: 'Load', 4: 'Loss', 8: 'Bandwidth'}[f.dscp] || 'Default';
+                        const dscpName = {1: 'Bandwidth', 2: 'Loss', 4: 'Load', 8: 'Delay'}[f.dscp] || 'Default';
                         const pathStr = f.path.join(' → ');
                         return `
                             <div class="switch-item" onclick="highlightFlowPath(${JSON.stringify(f.path_dpids).replace(/"/g, '&quot;')})" style="cursor: pointer;">

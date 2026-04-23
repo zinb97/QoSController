@@ -123,8 +123,8 @@ class ChinaBackboneTopo(Topo):
             dpid = f'00000000{NetworkLevel.CORE.value:02x}{idx:02x}0001'
             self.core[city] = self.addSwitch(f'C{idx}', dpid=dpid, protocols='OpenFlow13')
         # 全互联
-        self.addLink(self.core['bj'], self.core['sh'], bw=500, delay='15ms', loss=0.1, cls=TCLink)
-        self.addLink(self.core['bj'], self.core['gz'], bw=1000, delay='5ms', loss=0.1, cls=TCLink)
+        self.addLink(self.core['bj'], self.core['sh'], bw=500, delay='22ms', loss=0.1, cls=TCLink)
+        self.addLink(self.core['bj'], self.core['gz'], bw=1000, delay='8ms', loss=0.1, cls=TCLink)
         self.addLink(self.core['sh'], self.core['gz'], bw=1000, delay='5ms', loss=0.1, cls=TCLink)
 
     def _build_agg(self):
