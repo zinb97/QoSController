@@ -25,8 +25,8 @@ sudo mn --topo linear,2 --controller remote,ip=127.0.0.1,port=6653 --switch ovsk
 
 # 自定义拓扑
 sudo python netSim.py -t dual    # 双交换机测试拓扑
-sudo python netSim.py -t ring    # 环形网络拓扑
-sudo python netSim.py -t net      # 骨干网拓扑（默认层级3）
+sudo python netSim.py -t ring    # 环形网络拓扑（默认6节点，可通过参数调整）
+sudo python netSim.py -t net     # 骨干网拓扑（默认层级3）
 sudo python netSim.py net -l 3 -f # 层级3 + 全量23省接入节点
 ```
 
@@ -55,24 +55,39 @@ QoSController.py       # RYU SDN 控制器（单文件）
   │   ├── MAC/IP 学习（packet-in 时学习源 MAC/IP）
   │   ├── packet-in 事件处理（二层转发+流表下发）
   │   ├── 拓扑发现（EventSwitchEnter, EventLinkAdd, EventHostAdd）
-  │   ├── 最短路径计算（BFS）
-  │   └── ARP 代理处理
+  │   ├── 最短路径计算（BFS/Dijkstra，详见 DSCP 路由策略）
+  │   ├── ARP 代理处理
+  │   └── 组播组管理（IGMP 加入/离开，UDP 组播流规则安装）
   └── TopologyController # REST API 控制器
+      ├── GET /              → Web 可视化页面（topology_web.html）
       ├── GET /topology/data → JSON 拓扑数据
-      └── GET /              → Web 可视化页面
+      └── GET /flows/active → 活跃流列表
 
-ofctl_rest.py           # RYU 标准 OFCTL REST API（OpenFlow 1.0~1.5 支持）
+ofctl_rest.py           # RYU OFCTL REST API（支持 OF 1.0~1.5）
                         # 提供流表、端口、Meter、Group 等管理接口
+                        # 使用方式：ryu-manager QoSController.py ofctl_rest.py ...
 
 netSim.py               # Mininet 拓扑生成器
   ├── DualSwitchTopo     # 双交换机测试拓扑（2主机+2交换机）
-  ├── RingTopo           # 环形网络（n个交换机+主机）
+  ├── RingTopo           # 环形网络（n个交换机+主机，默认6节点）
   └── ChinaBackboneTopo  # 骨干网分层拓扑
+
+client.py               # 强化学习组播树构建（RL_multicast_tree）
 
 topology_web.html       # 浏览器端拓扑可视化（vis-network，每 2 秒轮询）
 
-utils.py                # tc (traffic control) 统计解析工具
+utils.py                # tc 统计解析工具（链路带宽/延迟/丢包）
 ```
+
+## DSCP 路由策略
+
+| DSCP值 | 路由策略 | 说明 |
+|--------|----------|------|
+| 0/未设置 | 最短跳数 | hop count（默认） |
+| 4 | 带宽优先 | max-bw，选取带宽最大的路径 |
+| 8 | 丢包率优先 | min-loss，选取丢包率最低的路径 |
+| 16 | 负载均衡 | min-load，选取剩余带宽最大的路径 |
+| 32 | 延迟优先 | min-delay，选取总延迟最小的路径 |
 
 ## DPID 规范（ChinaBackboneTopo）
 

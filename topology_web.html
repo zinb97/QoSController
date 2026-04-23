@@ -748,25 +748,35 @@
         }
 
         function getLinkLoadColor(link) {
-            // 根据负载与带宽的比值计算颜色
-            // 0% = 绿色, 50% = 黄色, 100% = 红色
+            // 根据链路负载计算颜色：
+            // 带宽 < 1M 时 → 灰色（流量太低，不够明显）
+            // 带宽 >= 1M 时：绿色(<50%) → 黄色(50%~80%) → 红色(>=80%)
             if (!link.load || !link.bw || link.bw === 0) {
-                return { color: '#58a6ff', highlight: '#79c0ff' }; // 默认蓝色
+                return { color: '#58a6ff', highlight: '#79c0ff' }; // 默认蓝色（无数据）
             }
-            const ratio = link.load.total_bps / link.bw;
+            const loadMbps = link.load.total_bps;
+            if (loadMbps < 1) {
+                return { color: '#95a5a6', highlight: '#bdc3c7' }; // 灰色 - 流量太低
+            }
+            const ratio = loadMbps / link.bw;
             let r, g, b;
             if (ratio < 0.5) {
                 // 绿色到黄色 (0% -> 50%)
                 const t = ratio * 2; // 0 -> 1
-                r = Math.round(88 * t);
-                g = 166;
-                b = Math.round(81 * (1 - t));
+                r = Math.round(39 * t);
+                g = 174;
+                b = Math.round(96 * (1 - t));
+            } else if (ratio < 0.8) {
+                // 黄色到红色 (50% -> 80%)
+                const t = (ratio - 0.5) / 0.3; // 0 -> 1
+                r = 243;
+                g = Math.round(156 * (1 - t));
+                b = 18;
             } else {
-                // 黄色到红色 (50% -> 100%)
-                const t = (ratio - 0.5) * 2; // 0 -> 1
-                r = 88 + Math.round((237 - 88) * t);
-                g = 166 - Math.round(166 * t);
-                b = Math.round(81 * t);
+                // 超过 80% 保持红色
+                r = 231;
+                g = 76;
+                b = 60;
             }
             const color = `rgb(${r}, ${g}, ${b})`;
             const highlight = `rgb(${Math.min(r + 30, 255)}, ${Math.min(g + 30, 255)}, ${Math.min(b + 30, 255)})`;

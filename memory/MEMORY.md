@@ -1,0 +1,1 @@
+- [语言偏好](language_preference.md) — 始终用简体中文回答，不切换语言
