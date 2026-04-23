@@ -620,6 +620,24 @@ class QoSController(app_manager.RyuApp):
         if msgtype in [0x11]:
             return
 
+        # 检查是否重复加入或重复离开
+        if msgtype in [0x12, 0x16]:  # Join
+            if multicast_addr in self.multicast_groups:
+                if dpid in self.multicast_groups[multicast_addr]:
+                    if src_mac in self.multicast_groups[multicast_addr][dpid]:
+                        self.logger.info(f"[IGMP] Host {src_ip} already in group {multicast_addr}, skipping")
+                        return
+        elif msgtype == 0x17:  # Leave
+            if multicast_addr not in self.multicast_groups:
+                self.logger.info(f"[IGMP] Group {multicast_addr} does not exist, skipping leave")
+                return
+            if dpid not in self.multicast_groups[multicast_addr]:
+                self.logger.info(f"[IGMP] Switch {dpid} has no members in group {multicast_addr}, skipping leave")
+                return
+            if src_mac not in self.multicast_groups[multicast_addr][dpid]:
+                self.logger.info(f"[IGMP] Host {src_ip} not in group {multicast_addr}, skipping leave")
+                return
+
         # 检查该组播组是否已安装过流表
         if multicast_addr in self.multicast_flow_installed:
             self.logger.info(f"[IGMP] Group {multicast_addr} has existing flow rules, deleting them first")
