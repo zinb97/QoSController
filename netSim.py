@@ -82,21 +82,7 @@ class ChinaBackboneTopo(Topo):
         self.prov_depth = prov_depth
         self.prov_width = prov_width
         super().__init__(**params)
-        self._init_link_config()
         self.build_topo()
-
-    def _init_link_config(self):
-        """初始化各层级链路带宽/延迟/丢包配置"""
-        self.link_cfg = {
-            'core_core':   {'bw': 1000, 'delay': '1ms', 'loss': 0.1, 'cls': TCLink},
-            'core_agg':    {'bw': 400,  'delay': '2ms', 'loss': 0.1, 'cls': TCLink},
-            'agg_acc':     {'bw': 100,  'delay': '3ms', 'loss': 0.2, 'cls': TCLink},
-            'acc_prov':    {'bw': 100,  'delay': '3ms', 'loss': 0.2, 'cls': TCLink},
-            'prov_core':   {'bw': 100,  'delay': '1ms', 'loss': 0.1, 'cls': TCLink},
-            'prov_metro':  {'bw': 100,  'delay': '2ms', 'loss': 0.2, 'cls': TCLink},
-            'metro_acc':   {'bw': 50,   'delay': '3ms', 'loss': 0.3, 'cls': TCLink},
-            'acc_inner':   {'bw': 50,   'delay': '1ms', 'loss': 0.1, 'cls': TCLink},
-        }
 
     def build_topo(self):
         """拓扑构建主入口"""
@@ -123,7 +109,7 @@ class ChinaBackboneTopo(Topo):
             dpid = f'00000000{NetworkLevel.CORE.value:02x}{idx:02x}0001'
             self.core[city] = self.addSwitch(f'C{idx}', dpid=dpid, protocols='OpenFlow13')
         # 全互联
-        self.addLink(self.core['bj'], self.core['sh'], bw=500, delay='22ms', loss=0.1, cls=TCLink)
+        self.addLink(self.core['bj'], self.core['sh'], bw=400, delay='22ms', loss=0.2, cls=TCLink)
         self.addLink(self.core['bj'], self.core['gz'], bw=1000, delay='8ms', loss=0.1, cls=TCLink)
         self.addLink(self.core['sh'], self.core['gz'], bw=1000, delay='5ms', loss=0.1, cls=TCLink)
 
@@ -135,11 +121,11 @@ class ChinaBackboneTopo(Topo):
             self.agg[city] = self.addSwitch(f'A{idx}', dpid=dpid, protocols='OpenFlow13')
         # 上联核心
         self.addLink(self.agg['xa'], self.core['bj'], bw=400, delay='3ms', loss=0.1, cls=TCLink)
-        self.addLink(self.agg['xa'], self.core['sh'], bw=400, delay='3ms', loss=0.1, cls=TCLink)
-        self.addLink(self.agg['cd'], self.core['bj'], **self.link_cfg['core_agg'])
-        self.addLink(self.agg['wh'], self.core['bj'], **self.link_cfg['core_agg'])
-        self.addLink(self.agg['nj'], self.core['sh'], **self.link_cfg['core_agg'])
-        self.addLink(self.agg['sy'], self.core['gz'], **self.link_cfg['core_agg'])
+        self.addLink(self.agg['xa'], self.core['sh'], bw=400, delay='4ms', loss=0.1, cls=TCLink)
+        self.addLink(self.agg['cd'], self.core['bj'], bw=400, delay='3ms', loss=0.1, cls=TCLink)
+        self.addLink(self.agg['wh'], self.core['bj'], bw=400, delay='3ms', loss=0.1, cls=TCLink)
+        self.addLink(self.agg['nj'], self.core['sh'], bw=400, delay='3ms', loss=0.1, cls=TCLink)
+        self.addLink(self.agg['sy'], self.core['gz'], bw=400, delay='3ms', loss=0.1, cls=TCLink)
 
     def _build_access(self):
         """骨干接入层：简化5节点 / 全量23节点"""
@@ -150,7 +136,7 @@ class ChinaBackboneTopo(Topo):
             sw = self.addSwitch(f'N{i}', dpid=dpid, protocols='OpenFlow13')
             self.acc.append(sw)
             # 负载均衡上联汇聚层
-            self.addLink(sw, agg_list[(i-1) % len(agg_list)], **self.link_cfg['agg_acc'])
+            self.addLink(sw, agg_list[(i-1) % len(agg_list)], bw=400, delay='3ms', loss=0.1, cls=TCLink)
             # 末端交换机挂载主机
             host = self.addHost(f'h{i}', ip=f'10.0.0.{i}/24')
             self.addLink(sw, host)

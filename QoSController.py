@@ -393,7 +393,7 @@ class QoSController(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions, idle_timeout=0)
 
-        for dscp in [4, 8, 16, 32]:
+        for dscp in [1, 2, 4, 8]:
             match = parser.OFPMatch(eth_type=0x0800, ip_dscp=dscp)
             actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
             self.add_flow(datapath, 100, match, actions, idle_timeout=0)
@@ -1207,21 +1207,20 @@ class QoSController(app_manager.RyuApp):
         if src not in self.graph or dst not in self.graph:
             return []
         try:
-            if dscp == 4:
+            if dscp == 1:
                 def weight_bw(u, v, d):
                     bw = d.get("bw", 0)
                     return 1.0 / (bw + 0.001)
                 path = nx.shortest_path(self.graph, src, dst, weight=weight_bw)
-            elif dscp == 8:
+            elif dscp == 2:
                 path = nx.shortest_path(self.graph, src, dst, weight='loss')
-            elif dscp == 16:
+            elif dscp == 4:
                 def weight_load(u, v, d):
                     bw = d.get("bw", 0.1)
                     load= d.get("total_bps", 0)
                     return 1 / (bw - load) if bw != load else 999
-
                 path = nx.shortest_path(self.graph, src, dst, weight=weight_load)
-            elif dscp == 32:
+            elif dscp == 8:
                 path = nx.shortest_path(self.graph, src, dst, weight='delay')
             else:
                 path = nx.shortest_path(self.graph, src, dst)
