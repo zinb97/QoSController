@@ -677,19 +677,14 @@ class QoSController(app_manager.RyuApp):
                 self.logger.info(f"[Multicast Route] Member Hosts in Destination Group: {member_ips}")
                 self.logger.info(f"[Multicast Route] Member Switches: {member_id_list}")
 
-                netsize = len(self.adj_matrix_nodes)
+                net_size = len(self.adj_matrix_nodes)
 
-                np.random.seed(42)
-                latency_base = np.random.uniform(1, 100, (netsize, netsize))
-                latency_matrix = (latency_base + latency_base.T) / 2 * adj_matrix
-
-                # 生成随机带宽矩阵 (对称矩阵，只看上三角)
-                bandwidth_base = np.random.uniform(10, 1000, (netsize, netsize))
-                bandwidth_matrix = (bandwidth_base + bandwidth_base.T) / 2 * adj_matrix
-
-                # 生成随机丢包矩阵 (对称矩阵，只看上三角)
-                loss_base = np.random.uniform(0.001, 0.1, (netsize, netsize))
-                loss_matrix = (loss_base + loss_base.T) / 2 * adj_matrix
+                # 获取延迟矩阵
+                latency_matrix = nx.attr_matrix(self.graph, edge_attr='delay', rc_order=self.adj_matrix_nodes, dtype=np.float32)
+                # 获取带宽矩阵
+                bandwidth_matrix = nx.attr_matrix(self.graph, edge_attr='bw', rc_order=self.adj_matrix_nodes, dtype=np.float32)
+                # 获取丢包矩阵
+                loss_matrix = nx.attr_matrix(self.graph, edge_attr='loss', rc_order=self.adj_matrix_nodes, dtype=np.float32)
 
                 # 调用智能组播路由构建算法构建组播路由,  1-based:source_node,destination_group
                 is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, bandwidth_matrix, loss_matrix,
@@ -707,7 +702,7 @@ class QoSController(app_manager.RyuApp):
 
                     while queue:
                         i = queue.popleft()
-                        for j in range(netsize):
+                        for j in range(net_size):
                             if route_matrix[i, j] == 1:
                                 route_matrix[j, i] = 0  # 删除反向边，确保单向性
                                 if j not in visited:
@@ -718,7 +713,7 @@ class QoSController(app_manager.RyuApp):
 
                     # 根据单向性矩阵安装组播流规则
                     installed_flows = []
-                    for i in range(netsize):
+                    for i in range(net_size):
                         src_node_dpid = self.adj_matrix_nodes[i]
                         if src_node_dpid not in self.datapaths:
                             continue
@@ -736,7 +731,7 @@ class QoSController(app_manager.RyuApp):
                                 self.logger.info(f"[Multicast Flow] SW:{self.sw_name(src_node_dpid)} -> host port {member_port}")
 
                         # 遍历 route_matrix[i][j] == 1，转发到下一跳交换机（源/中间交换机）
-                        for j in range(netsize):
+                        for j in range(net_size):
                             if route_matrix[i][j] == 1:
                                 dst_node_dpid = self.adj_matrix_nodes[j]
                                 out_port = self.get_path_out_port(src_node_dpid, dst_node_dpid)
