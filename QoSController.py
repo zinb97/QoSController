@@ -398,6 +398,11 @@ class QoSController(app_manager.RyuApp):
             actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
             self.add_flow(datapath, 100, match, actions, idle_timeout=0)
 
+        # 表项：默认丢弃所有 UDP 组播报文（优先级低于具体组播组规则）
+        match = parser.OFPMatch(eth_type=0x0800, ip_proto=17, ipv4_dst=("224.0.0.0", "240.0.0.0"))
+        actions = []  # 空动作 = 丢弃
+        self.add_flow(datapath, 1, match, actions, idle_timeout=0)
+
     # ==================== 核心：PacketIn 处理 ====================
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
