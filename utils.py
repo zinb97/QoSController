@@ -24,7 +24,7 @@ _DELAY_UNITS = {
 
 
 def get_tc_stats_optimized(dev):
-    bandwidth, delay, loss = None, 0, 0
+    bandwidth, delay, loss = 0, 0, 0
     try:
         class_output = subprocess.check_output(
             ["tc", "class", "show", "dev", dev],
@@ -48,7 +48,7 @@ def get_tc_stats_optimized(dev):
     # 2. 单次遍历同时解析所有指标
     for line in lines:
         # 解析带宽（仅在未找到时继续匹配）
-        if bandwidth is None:
+        if not bandwidth:
             bw_match = _BW_PATTERN.search(line)
             if bw_match:
                 val, unit = bw_match.groups()
