@@ -41,7 +41,7 @@ def RL_multicast_tree(adjacency_matrix, latency_matrix, bandwidth_matrix, loss_m
     if response.success:
         return response.success, np.array(unflatten_matrix(response.multicast_tree.row, response.multicast_tree.size))
     else:
-        return response.success
+        return response.success, None
 
 
 if __name__ == '__main__':
