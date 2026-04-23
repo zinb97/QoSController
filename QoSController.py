@@ -45,6 +45,8 @@ class QoSController(app_manager.RyuApp):
         self.multicast_flows = {}
         # 组播流规则安装标记集合: 标记已安装流规则的组播组地址
         self.multicast_flow_installed = set()
+        # 组播源节点记录: {组播组地址: 源节点IP}
+        self.multicast_sources = {}
 
         # 拓扑相关 - 使用 networkx DiGraph
         self.graph = nx.DiGraph()        # 保存完整拓扑（节点=交换机，边=链路）
@@ -621,8 +623,25 @@ class QoSController(app_manager.RyuApp):
 
         self.logger.info(f"[IGMP] SW:{dpid} IGMP {type_name} from {src_ip} for group {multicast_addr}")
 
-        # Query 消息暂不做处理
         if msgtype in [0x11]:
+            # 将源 IP 地址作为该组播组的源节点记录
+            self.logger.info(f"[IGMP Query] Source IP: {src_ip}, Multicast Group: {multicast_addr}")
+            if multicast_addr == '224.0.0.0':
+                # 224.0.0.0 代表删除源IP的信号，用 src_ip 查找并删除对应关系
+                groups_to_delete = [g for g, s in self.multicast_sources.items() if s == src_ip]
+                for g in groups_to_delete:
+                    del self.multicast_sources[g]
+                    self.logger.info(f"[IGMP Query] Received 224.0.0.0, removed source {src_ip} for group {g}")
+                if not groups_to_delete:
+                    self.logger.info(f"[IGMP Query] Received 224.0.0.0, but no group found with source {src_ip}")
+            elif multicast_addr != '0.0.0.0':  # Specific Query
+                if multicast_addr not in self.multicast_sources:
+                    # 组播组还没有源IP，记录
+                    self.multicast_sources[multicast_addr] = src_ip
+                    self.logger.info(f"[IGMP Query] Recorded source node {src_ip} for multicast group {multicast_addr}")
+                else:
+                    # 组播组已有源IP，不允许更改
+                    self.logger.info(f"[IGMP Query] Source node for {multicast_addr} already recorded as {self.multicast_sources[multicast_addr]}, skipping")
             return
 
         # 检查是否重复加入或重复离开
@@ -898,6 +917,9 @@ class QoSController(app_manager.RyuApp):
                     # 如果所有交换机都没有该组播组的成员了，删除该组播组
                     if not self.multicast_groups[multicast_addr]:
                         del self.multicast_groups[multicast_addr]
+                        # 清理组播源记录
+                        if multicast_addr in self.multicast_sources:
+                            del self.multicast_sources[multicast_addr]
                 else:
                     self.logger.info(f"[Multicast Group] Host not in group: MAC={mac}")
             else:
