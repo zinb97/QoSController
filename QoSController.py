@@ -2,6 +2,7 @@ from typing import List
 
 from ryu.base import app_manager
 from ryu.controller import ofp_event
+from ryu.controller.ofp_event import EventOFPFlowRemoved
 from ryu.controller.handler import set_ev_cls, MAIN_DISPATCHER, CONFIG_DISPATCHER
 from ryu.ofproto import ofproto_v1_3, ether
 from ryu.topology import event
@@ -161,6 +162,7 @@ class QoSController(app_manager.RyuApp):
     def _add_path_flow(self, src_ip, dst_ip, dscp, path_switches):
         # 重新路径流表
         priority = 101 if dscp else 10
+        idle_timeout = 180 if dscp else 30
         for ps in path_switches:
             sw_dp = self.datapaths.get(ps['dpid'])
             if sw_dp:
@@ -172,7 +174,7 @@ class QoSController(app_manager.RyuApp):
                     match = parser.OFPMatch(in_port=ps['in_port'], eth_type=ether.ETH_TYPE_IP,
                                             ipv4_src=src_ip, ipv4_dst=dst_ip)
                 actions = [parser.OFPActionOutput(ps['out_port'])]
-                self.add_flow(sw_dp, priority, match, actions, idle_timeout=120)
+                self.add_flow(sw_dp, priority, match, actions, idle_timeout=idle_timeout)
 
                 # 反向流表
                 if dscp:
@@ -182,7 +184,7 @@ class QoSController(app_manager.RyuApp):
                     match = parser.OFPMatch(in_port=ps['out_port'], eth_type=ether.ETH_TYPE_IP,
                                             ipv4_src=dst_ip, ipv4_dst=src_ip)
                 actions = [parser.OFPActionOutput(ps['in_port'])]
-                self.add_flow(sw_dp, priority, match, actions, idle_timeout=120)
+                self.add_flow(sw_dp, priority, match, actions, idle_timeout=idle_timeout)
                 # self.logger.info(f"[Flow] : -> {ps['in_port']} : {self.sw_name(ps['dpid'])} : {ps['out_port']} ->")
 
     def _delete_flow(self, src_ip, dst_ip, dscp=None):
@@ -440,6 +442,33 @@ class QoSController(app_manager.RyuApp):
         if ipv4_pkt:
             self.handle_ipv4(datapath, in_port, msg, eth, ipv4_pkt, pkt)
             return
+
+    # ==================== 流表过期处理 ====================
+    @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
+    def _flow_removed_handler(self, ev):
+        """处理交换机流表因 idle_timeout 过期而被删除的事件"""
+        msg = ev.msg
+        datapath = msg.datapath
+        ofproto = datapath.ofproto
+        dpid = datapath.id
+
+        match = msg.match
+        # 从 match 中提取流信息
+        ipv4_src = match.get('ipv4_src')
+        ipv4_dst = match.get('ipv4_dst')
+        ip_dscp = match.get('ip_dscp', 0)
+
+        if msg.reason not in (ofproto.OFPRR_IDLE_TIMEOUT, ofproto.OFPRR_HARD_TIMEOUT):
+            return
+        if not ipv4_src or not ipv4_dst:
+            return
+
+        if ipv4_src and ipv4_dst:
+            flow_key = ipv4_src, ipv4_dst, ip_dscp
+            if flow_key in self.active_flows:
+                del self.active_flows[flow_key]
+                self.logger.info(f"[FlowRemoved] Flow expired on SW:{self.sw_name(dpid)}: {ipv4_src} -> {ipv4_dst} "
+                                 f"{'(dscp={ip_dscp})' if ip_dscp else ''}, removed from active_flows")
 
     # ==================== ARP 处理 ====================
     def handle_arp(self, datapath, in_port, msg, eth_pkt, arp_pkt):
@@ -1206,11 +1235,13 @@ class QoSController(app_manager.RyuApp):
         if buffer_id:
             mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id, priority=priority,
                                     match=match, instructions=inst,
-                                    idle_timeout=idle_timeout, hard_timeout=hard_timeout)
+                                    idle_timeout=idle_timeout, hard_timeout=hard_timeout,
+                                    flags=ofproto.OFPFF_SEND_FLOW_REM)
         else:
             mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
                                     match=match, instructions=inst,
-                                    idle_timeout=idle_timeout, hard_timeout=hard_timeout)
+                                    idle_timeout=idle_timeout, hard_timeout=hard_timeout,
+                                    flags=ofproto.OFPFF_SEND_FLOW_REM)
         datapath.send_msg(mod)
 
         # ==================== 最短路径（使用 networkx） ====================
