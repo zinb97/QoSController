@@ -876,16 +876,12 @@ class QoSController(app_manager.RyuApp):
                     if not self.multicast_groups[multicast_addr][dpid]:
                         del self.multicast_groups[multicast_addr][dpid]
 
-                    # 如果所有交换机都没有该组播组的成员了，删除该组播组
+                    # 如果该组播组没有组播成员了
                     if not self.multicast_groups[multicast_addr]:
-                        del self.multicast_groups[multicast_addr]
-                        # 清理组播源记录
-                        if multicast_addr in self.multicast_sources:
-                            del self.multicast_sources[multicast_addr]
-                        # 清理组播流规则
-                        if multicast_addr in self.multicast_flow_installed:
-                            self._delete_multicast_flows(multicast_addr)
-                            self.multicast_flow_installed.discard(multicast_addr)
+                        # 且该组播组没有对应的源IP，则删除该组播组
+                        # 否则不做操作，保留该组播组（后续有新成员加入时可复用源IP）
+                        if multicast_addr not in self.multicast_sources:
+                            del self.multicast_groups[multicast_addr]
                     else:
                         # 如果该组播组删除主机后还有组播成员，且有源IP，则重新安装流规则
                         if multicast_addr in self.multicast_sources:
