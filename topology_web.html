@@ -554,6 +554,19 @@
         </div>
 
         <aside class="sidebar">
+            <div class="sidebar-section" style="margin-bottom: 12px;">
+                <button onclick="toggleAllSections()" id="toggleAllBtn" style="
+                    width: 100%;
+                    padding: 8px 12px;
+                    background: #30363d;
+                    border: 1px solid #484f58;
+                    border-radius: 6px;
+                    color: #e6edf3;
+                    font-size: 12px;
+                    cursor: pointer;
+                    margin-bottom: 8px;
+                ">Collapse All</button>
+            </div>
             <div class="sidebar-section" id="statsSection">
                 <div class="section-title" onclick="toggleSection('statsSection')">Statistics</div>
                 <div class="stats-grid">
@@ -1243,6 +1256,22 @@
         function toggleSection(sectionId) {
             const section = document.getElementById(sectionId);
             section.classList.toggle('collapsed');
+        }
+
+        function toggleAllSections() {
+            const btn = document.getElementById('toggleAllBtn');
+            const sections = document.querySelectorAll('.sidebar-section');
+            const allCollapsed = Array.from(sections).every(s => s.classList.contains('collapsed'));
+
+            if (allCollapsed) {
+                // Expand all
+                sections.forEach(s => s.classList.remove('collapsed'));
+                btn.textContent = 'Collapse All';
+            } else {
+                // Collapse all
+                sections.forEach(s => s.classList.add('collapsed'));
+                btn.textContent = 'Expand All';
+            }
         }
 
         window.onload = function() {
