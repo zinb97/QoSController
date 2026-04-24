@@ -1315,24 +1315,55 @@ class TopologyController(ControllerBase):
 
     @route('multicast', '/multicast/weights/{multicast_addr}', methods=['PUT', 'POST'])
     def set_multicast_weight(self, req, multicast_addr):
-        """设置指定组播组的权重配置"""
+        """设置指定组播组的权重配置
+
+        如果设置的权重与原有权重不同，且该组播组满足以下条件：
+        1. 存在源 IP（multicast_sources 中有记录）
+        2. 已安装过流规则（multicast_flow_installed 中有记录）
+
+        则会删除已有的流规则，并使用新权重重新安装流规则。
+        """
         try:
             data = json.loads(req.body.decode('utf-8'))
             latency = float(data.get('latency_weight', 1.0))
             bandwidth = float(data.get('bandwidth_weight', 1.0))
             loss = float(data.get('loss_weight', 1.0))
+
             # 验证权重值在 [0, 1] 范围内
             if not (0 <= latency <= 1 and 0 <= bandwidth <= 1 and 0 <= loss <= 1):
                 error_msg = json.dumps({'success': False, 'error': 'Weight values must be in range [0, 1]'}, ensure_ascii=False).encode('utf-8')
                 return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
-            weight = {
+
+            # 构造新权重对象
+            new_weight = {
                 'latency': latency,
                 'bandwidth': bandwidth,
                 'loss': loss
             }
-            self.switch_app.multicast_weights[multicast_addr] = weight
-            self.switch_app.logger.info(f"[Multicast Weights] Set weights for {multicast_addr}: {weight}")
-            body = json.dumps({'success': True, 'weights': weight}, ensure_ascii=False).encode('utf-8')
+
+            # 获取该组播组原有的权重配置（如果存在）
+            old_weight = self.switch_app.multicast_weights.get(multicast_addr)
+
+            # 检查权重是否发生变化
+            weights_changed = (old_weight is None) or (
+                old_weight['latency'] != latency or
+                old_weight['bandwidth'] != bandwidth or
+                old_weight['loss'] != loss
+            )
+
+            # 如果权重发生变化，且组播组已安装流规则，则需要重新安装
+            if weights_changed and multicast_addr in self.switch_app.multicast_flow_installed:
+                # 保存新的权重配置
+                self.switch_app.multicast_weights[multicast_addr] = new_weight
+                self.switch_app.logger.info(f"[Multicast Weights] Set weights for {multicast_addr}: {new_weight}")
+                self.switch_app.logger.info(f"[Multicast Weights] Weight changed for {multicast_addr}, reinstalling flow rules with new weights")
+                # 删除已安装的流规则
+                self.switch_app._delete_multicast_flows(multicast_addr)
+                self.switch_app.multicast_flow_installed.discard(multicast_addr)
+                # 重新安装流规则（使用新权重）
+                self.switch_app._install_multicast_flow_rules(multicast_addr)
+
+            body = json.dumps({'success': True, 'weights': new_weight}, ensure_ascii=False).encode('utf-8')
             return Response(content_type='application/json; charset=UTF-8', body=body)
         except Exception as e:
             error_msg = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
