@@ -478,6 +478,10 @@
             color: #58a6ff;
         }
 
+        .flow-table .index {
+            color: #79c0ff;
+        }
+
         .flow-table .match {
             color: #a5d6ff;
         }
@@ -1340,9 +1344,13 @@
                 }
 
                 let tableHtml = `
+                    <div style="margin-bottom: 12px; color: #79c0ff; font-size: 13px;">
+                        Total: ${flows.length} flow rule(s)
+                    </div>
                     <table class="flow-table">
                         <thead>
                             <tr>
+                                <th>#</th>
                                 <th>Priority</th>
                                 <th>Match</th>
                                 <th>Actions</th>
@@ -1354,7 +1362,7 @@
                         <tbody>
                 `;
 
-                flows.forEach(flow => {
+                flows.forEach((flow, index) => {
                     const priority = flow.priority || 0;
                     const durationSec = flow.duration_sec || 0;
                     const idleTimeout = flow.idle_timeout || 0;
@@ -1444,6 +1452,7 @@
 
                     tableHtml += `
                         <tr>
+                            <td class="index">${index + 1}</td>
                             <td class="priority">${priority}</td>
                             <td class="match">${matchStr || '-'}</td>
                             <td class="actions">${actionsStr || '-'}</td>
