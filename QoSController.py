@@ -695,6 +695,8 @@ class QoSController(app_manager.RyuApp):
             self.logger.info(f"[Multicast Flow] Group {multicast_addr} has no members, skipping flow installation")
             return False
 
+        self.logger.info(f"[Multicast Flow] multicast_weights content: {self.multicast_weights}")
+
         src_ip = self.multicast_sources[multicast_addr]
         src_switch_dpid = self.host_ip_to_dpid.get(src_ip)
         if not src_switch_dpid:
@@ -737,6 +739,7 @@ class QoSController(app_manager.RyuApp):
             # 获取该组播组的权重配置，默认为 1.0
             weights = self.multicast_weights.get(multicast_addr,
                                                  {'latency': 1.0, 'bandwidth': 1.0, 'loss': 1.0})
+            self.logger.info(f"[Multicast Route] Using weights for {multicast_addr}: latency={weights['latency']}, bandwidth={weights['bandwidth']}, loss={weights['loss']}")
             is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, bandwidth_matrix, loss_matrix,
                                                          source_node=src_switch_id,
                                                          destination_group=member_id_list,

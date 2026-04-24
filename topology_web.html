@@ -657,6 +657,13 @@
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">Fix Topology</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="fixTopology">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
             </div>
 
             <div class="sidebar-section" id="switchesSection">
@@ -736,6 +743,7 @@
         let showDelay = false;
         let showLoss = false;
         let showLoad = false;
+        let fixTopology = false;
         let currentHosts = [];
         let currentLinks = [];
 
@@ -869,6 +877,17 @@
             document.getElementById('showLoad').addEventListener('change', function(e) {
                 showLoad = e.target.checked;
                 updateLinkLabels();
+            });
+
+            document.getElementById('fixTopology').addEventListener('change', function(e) {
+                fixTopology = e.target.checked;
+                if (fixTopology) {
+                    // Disable physics to prevent automatic movement, but allow manual dragging
+                    network.setOptions({ physics: { enabled: false } });
+                } else {
+                    // Enable physics for dynamic movement
+                    network.setOptions({ physics: { enabled: true } });
+                }
             });
         }
 
@@ -1125,8 +1144,11 @@
         }
 
         function renderTopology(topo) {
-            // Store current positions
-            var positions = network.getPositions();
+            // Store current positions if fixTopology is enabled
+            var savedPositions = {};
+            if (fixTopology) {
+                savedPositions = network.getPositions();
+            }
 
             nodes.clear();
             edges.clear();
@@ -1134,12 +1156,18 @@
             // Add switches with level-based colors
             topo.switches.forEach(s => {
                 const colors = getSwitchColor(s.level);
-                nodes.add({
+                var nodeData = {
                     id: s.dpid,
                     label: s.name,
                     color: colors,
                     shadow: { enabled: true, color: colors.shadow || 'rgba(0,0,0,0.2)', size: 8, x: 0, y: 4 }
-                });
+                };
+                // Preserve position if fixTopology is enabled
+                if (fixTopology && savedPositions[s.dpid]) {
+                    nodeData.x = savedPositions[s.dpid].x;
+                    nodeData.y = savedPositions[s.dpid].y;
+                }
+                nodes.add(nodeData);
             });
 
             // Add links between switches
@@ -1169,7 +1197,7 @@
             topo.hosts.forEach((h, idx) => {
                 var hostId = 'host_' + h.mac.replace(/:/g, '');
                 currentHosts.push({ id: hostId, mac: h.mac });
-                nodes.add({
+                var hostNodeData = {
                     id: hostId,
                     label: h.ip || h.mac,
                     shape: 'ellipse',
@@ -1177,7 +1205,13 @@
                     font: { face: 'JetBrains Mono', size: 11, color: '#f0f6fc' },
                     margin: 10,
                     shadow: { enabled: true, color: 'rgba(46, 160, 67, 0.3)', size: 6, x: 0, y: 3 }
-                });
+                };
+                // Preserve host position if fixTopology is enabled
+                if (fixTopology && savedPositions[hostId]) {
+                    hostNodeData.x = savedPositions[hostId].x;
+                    hostNodeData.y = savedPositions[hostId].y;
+                }
+                nodes.add(hostNodeData);
                 // Connect host to switch
                 edges.add({ id: 'host_link_' + idx, from: hostId, to: h.dpid, color: { color: '#3fb950', highlight: '#56d364' }, arrows: { to: { enabled: false } } });
             });
@@ -1542,9 +1576,13 @@
                 return;
             }
 
-            const latency = parseFloat(document.getElementById('weightLatency').value) || 1.0;
-            const bandwidth = parseFloat(document.getElementById('weightBandwidth').value) || 1.0;
-            const loss = parseFloat(document.getElementById('weightLoss').value) || 1.0;
+            let latency = parseFloat(document.getElementById('weightLatency').value);
+            let bandwidth = parseFloat(document.getElementById('weightBandwidth').value);
+            let loss = parseFloat(document.getElementById('weightLoss').value);
+            // Handle NaN and invalid values, default to 1.0
+            if (isNaN(latency)) latency = 1.0;
+            if (isNaN(bandwidth)) bandwidth = 1.0;
+            if (isNaN(loss)) loss = 1.0;
 
             // Check if weights are all default (1.0, 1.0, 1.0)
             if (latency === 1.0 && bandwidth === 1.0 && loss === 1.0) {
