@@ -759,38 +759,50 @@
         }
 
         function getLinkLoadColor(link) {
-            // 根据链路负载计算颜色：
-            // 带宽 < 1M 时 → 灰色（流量太低，不够明显）
-            // 带宽 >= 1M 时：绿色(<50%) → 黄色(50%~80%) → 红色(>=80%)
+            // 根据链路负载计算颜色（更明显的颜色变化）：
+            // 带宽 < 0.5M 时 → 深灰色（几乎无流量）
+            // 带宽 >= 0.5M 时：
+            //   0-30%: 青色/蓝绿 (低负载，畅通)
+            //   30-60%: 黄色 (中等负载)
+            //   60-80%: 橙色 (较高负载)
+            //   80-100%: 深红色 (高负载，拥塞)
             if (!link.load || !link.bw || link.bw === 0) {
                 return { color: '#58a6ff', highlight: '#79c0ff' }; // 默认蓝色（无数据）
             }
             const loadMbps = link.load.total_bps;
-            if (loadMbps < 1) {
-                return { color: '#95a5a6', highlight: '#bdc3c7' }; // 灰色 - 流量太低
+            if (loadMbps < 0.5) {
+                return { color: '#4a5568', highlight: '#718096' }; // 深灰色 - 流量极低
             }
             const ratio = loadMbps / link.bw;
             let r, g, b;
-            if (ratio < 0.5) {
-                // 绿色到黄色 (0% -> 50%)
-                const t = ratio * 2; // 0 -> 1
-                r = Math.round(39 * t);
-                g = 174;
-                b = Math.round(96 * (1 - t));
+
+            if (ratio < 0.3) {
+                // 青色/蓝绿 (0% -> 30%) - 畅通
+                const t = ratio / 0.3;
+                r = Math.round(34 - 34 * t);         // 34 -> 0
+                g = Math.round(197 - 23 * t);        // 197 -> 174
+                b = Math.round(197 + 23 * t);        // 197 -> 220
+            } else if (ratio < 0.6) {
+                // 黄色 (30% -> 60%) - 中等
+                const t = (ratio - 0.3) / 0.3;
+                r = Math.round(237 + 6 * t);         // 237 -> 243
+                g = Math.round(201 - 45 * t);        // 201 -> 156
+                b = Math.round(38 - 20 * t);         // 38 -> 18
             } else if (ratio < 0.8) {
-                // 黄色到红色 (50% -> 80%)
-                const t = (ratio - 0.5) / 0.3; // 0 -> 1
-                r = 243;
-                g = Math.round(156 * (1 - t));
-                b = 18;
+                // 橙色 (60% -> 80%) - 较高
+                const t = (ratio - 0.6) / 0.2;
+                r = Math.round(243 - 12 * t);        // 243 -> 231
+                g = Math.round(156 - 80 * t);        // 156 -> 76
+                b = Math.round(18 - 0 * t);          // 18
             } else {
-                // 超过 80% 保持红色
-                r = 231;
-                g = 76;
-                b = 60;
+                // 深红色 (80%+) - 拥塞
+                const t = Math.min(1, (ratio - 0.8) / 0.2);
+                r = Math.round(231 - 31 * t);        // 231 -> 200
+                g = Math.round(76 - 56 * t);         // 76 -> 20
+                b = Math.round(60 - 45 * t);         // 60 -> 15
             }
             const color = `rgb(${r}, ${g}, ${b})`;
-            const highlight = `rgb(${Math.min(r + 30, 255)}, ${Math.min(g + 30, 255)}, ${Math.min(b + 30, 255)})`;
+            const highlight = `rgb(${Math.min(r + 40, 255)}, ${Math.min(g + 40, 255)}, ${Math.min(b + 40, 255)})`;
             return { color, highlight };
         }
 
@@ -1077,7 +1089,7 @@
                     shadow: { enabled: true, color: 'rgba(46, 160, 67, 0.3)', size: 6, x: 0, y: 3 }
                 });
                 // Connect host to switch
-                edges.add({ id: 'host_link_' + idx, from: hostId, to: h.dpid, color: { color: '#3fb950', highlight: '#56d364' } });
+                edges.add({ id: 'host_link_' + idx, from: hostId, to: h.dpid, color: { color: '#3fb950', highlight: '#56d364' }, arrows: { to: { enabled: false } } });
             });
 
             // Apply visibility based on toggle

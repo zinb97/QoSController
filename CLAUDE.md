@@ -67,16 +67,26 @@ ofctl_rest.py           # RYU OFCTL REST API（支持 OF 1.0~1.5）
                         # 提供流表、端口、Meter、Group 等管理接口
                         # 使用方式：ryu-manager QoSController.py ofctl_rest.py ...
 
+app/                    # RYU 应用示例集（含 ofctl/ 子模块）
+                        # 主要用途：ofctl_rest.py 依赖 app/ofctl/ 提供底层 OpenFlow 操作
+
 netSim.py               # Mininet 拓扑生成器
   ├── DualSwitchTopo     # 双交换机测试拓扑（2主机+2交换机）
   ├── RingTopo           # 环形网络（n个交换机+主机，默认6节点）
   └── ChinaBackboneTopo  # 骨干网分层拓扑
 
-client.py               # 强化学习组播树构建（RL_multicast_tree）
+client.py               # 强化学习组播树构建客户端（调用 gRPC 服务构建组播树）
 
-topology_web.html       # 浏览器端拓扑可视化（vis-network，每 2 秒轮询）
+topology_web.html       # 浏览器端拓扑可视化（项目根目录，vis-network，每 2 秒轮询）
 
-utils.py                # tc 统计解析工具（链路带宽/延迟/丢包）
+utils.py                # tc 统计解析工具（链路带宽/延迟/丢包）、OVS 交换机名称映射
+
+send_igmp.py            # IGMPv2 测试工具（发送 Join/Leave/Query 报文）
+                        # 用法：python send_igmp.py [join|leave|query] [组播地址]
+                        # 示例：python send_igmp.py join 239.255.255.250
+
+multicast_pb2.py        # gRPC 组播服务 protobuf 生成的 stub
+multicast_pb2_grpc.py  # gRPC 组播服务生成的 RPC 存根（调用远端 RL_multicast_tree 服务）
 ```
 
 ## DSCP 路由策略
@@ -119,6 +129,7 @@ DPID 为 16 进制 8 字节，格式：`00000000{L1}{L2:02x}0001`
 ## 实现细节
 
 - **OpenFlow 1.3**：RYU 与交换机通信使用 OF 1.3 协议
+- **gRPC 服务**：RL_multicast_tree 客户端连接 `192.168.10.21:50051`（可配置）构建组播树
 - **LLDP 拓扑发现**：需要 `--observe-links` 参数启用
 - **MAC 学习**：packet-in 时学习源 MAC，生成流表实现线速转发
 - **Web 轮询**：UI 每 2 秒轮询 `/topology/data` 更新拓扑
