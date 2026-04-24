@@ -693,6 +693,17 @@
                     </div>
                 </div>
             </div>
+
+            <div class="sidebar-section" id="multicastSection">
+                <div class="section-title" onclick="toggleSection('multicastSection')">Multicast Weights</div>
+                <div class="switch-list" id="multicastWeightList">
+                    <div class="switch-item">
+                        <div class="switch-info">
+                            <div class="switch-name">Loading...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </aside>
     </main>
 
@@ -1102,8 +1113,10 @@
             initNetwork();
             updateTopology();
             updateActiveFlows();
+            updateMulticastWeights();
             setInterval(updateTopology, 2000);
             setInterval(updateActiveFlows, 2000);
+            setInterval(updateMulticastWeights, 5000);
         };
 
         // Switch click handler for flow table
@@ -1308,6 +1321,394 @@
                 closeFlowModal();
             }
         });
+
+        // ==================== Multicast Weight Functions ====================
+        let currentWeightGroup = null;
+
+        function isValidMulticastAddress(ip) {
+            // Valid IPv4 multicast range: 224.0.0.0 - 239.255.255.255
+            const parts = ip.split('.');
+            if (parts.length !== 4) return false;
+            for (const part of parts) {
+                const num = parseInt(part, 10);
+                if (isNaN(num) || num < 0 || num > 255 || part === '' || part !== String(num)) {
+                    return false;
+                }
+            }
+            const first = parseInt(parts[0], 10);
+            return first >= 224 && first <= 239;
+        }
+
+        async function updateMulticastWeights() {
+            try {
+                const response = await fetch('/multicast/weights');
+                if (!response.ok) return;
+                const weights = await response.json();
+
+                const list = document.getElementById('multicastWeightList');
+                const weightKeys = Object.keys(weights);
+
+                // Always show "Add New" button at the top
+                let html = `
+                    <div class="switch-item" onclick="openWeightModal()" style="cursor: pointer; border-style: dashed; border-color: #9b59b6;">
+                        <div class="switch-icon" style="background:#9b59b6">+</div>
+                        <div class="switch-info">
+                            <div class="switch-name">Add New Weight</div>
+                            <div class="switch-dpid">Click to add a new multicast group</div>
+                        </div>
+                    </div>
+                `;
+
+                if (weightKeys.length === 0) {
+                    list.innerHTML = html;
+                } else {
+                    list.innerHTML = html + weightKeys.map(group => {
+                        const w = weights[group];
+                        return `
+                            <div class="switch-item" onclick="openWeightModal('${group}')" style="cursor: pointer;">
+                                <div class="switch-icon" style="background:#9b59b6">⚙</div>
+                                <div class="switch-info">
+                                    <div class="switch-name">${group}</div>
+                                    <div class="switch-dpid">L:${w.latency} B:${w.bandwidth} Loss:${w.loss}</div>
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                }
+            } catch (e) {
+                console.log('Failed to fetch multicast weights:', e);
+            }
+        }
+
+        async function openWeightModal(group) {
+            currentWeightGroup = group || '';
+            document.getElementById('modalWeightGroup').textContent = group ? ' - ' + group : '';
+            document.getElementById('weightSuccess').style.display = 'none';
+            document.getElementById('weightError').style.display = 'none';
+
+            // Show/hide group address input based on mode
+            const groupInput = document.getElementById('weightGroupInput');
+            const groupField = document.getElementById('weightGroup');
+            if (group) {
+                groupInput.style.display = 'none';
+                groupField.value = group;
+            } else {
+                groupInput.style.display = 'block';
+                groupField.value = '';
+            }
+
+            // Load current weights
+            if (group) {
+                try {
+                    const response = await fetch('/multicast/weights/' + encodeURIComponent(group));
+                    if (response.ok) {
+                        const w = await response.json();
+                        document.getElementById('weightLatency').value = w.latency;
+                        document.getElementById('weightBandwidth').value = w.bandwidth;
+                        document.getElementById('weightLoss').value = w.loss;
+                    }
+                } catch (e) {
+                    console.log('Failed to load weight:', e);
+                }
+            } else {
+                // New weight - default values
+                document.getElementById('weightLatency').value = 1.0;
+                document.getElementById('weightBandwidth').value = 1.0;
+                document.getElementById('weightLoss').value = 1.0;
+            }
+
+            document.getElementById('weightModal').classList.add('active');
+        }
+
+        function closeWeightModal() {
+            document.getElementById('weightModal').classList.remove('active');
+            currentWeightGroup = null;
+        }
+
+        async function saveWeight() {
+            const group = document.getElementById('weightGroup').value.trim();
+            if (!group) {
+                document.getElementById('weightError').textContent = 'Please enter a multicast group address';
+                document.getElementById('weightError').style.display = 'block';
+                return;
+            }
+
+            // Validate multicast address (224.0.0.0 - 239.255.255.255)
+            if (!isValidMulticastAddress(group)) {
+                document.getElementById('weightError').textContent = 'Invalid multicast address. Must be in range 224.0.0.0 - 239.255.255.255';
+                document.getElementById('weightError').style.display = 'block';
+                return;
+            }
+
+            const latency = parseFloat(document.getElementById('weightLatency').value) || 1.0;
+            const bandwidth = parseFloat(document.getElementById('weightBandwidth').value) || 1.0;
+            const loss = parseFloat(document.getElementById('weightLoss').value) || 1.0;
+
+            // Check if weights are all default (1.0, 1.0, 1.0)
+            if (latency === 1.0 && bandwidth === 1.0 && loss === 1.0) {
+                document.getElementById('weightError').textContent = 'Custom weights must be different from default (1.0, 1.0, 1.0)';
+                document.getElementById('weightError').style.display = 'block';
+                return;
+            }
+
+            try {
+                const response = await fetch('/multicast/weights/' + encodeURIComponent(group), {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        latency_weight: latency,
+                        bandwidth_weight: bandwidth,
+                        loss_weight: loss
+                    })
+                });
+
+                if (response.ok) {
+                    document.getElementById('weightSuccess').style.display = 'block';
+                    setTimeout(() => {
+                        closeWeightModal();
+                        updateMulticastWeights();
+                    }, 1000);
+                } else {
+                    const data = await response.json();
+                    document.getElementById('weightError').textContent = data.error || 'Failed to save weights';
+                    document.getElementById('weightError').style.display = 'block';
+                }
+            } catch (e) {
+                document.getElementById('weightError').textContent = 'Failed to save weights';
+                document.getElementById('weightError').style.display = 'block';
+            }
+        }
+
+        async function deleteWeight() {
+            if (!currentWeightGroup) {
+                closeWeightModal();
+                return;
+            }
+
+            try {
+                const response = await fetch('/multicast/weights/' + encodeURIComponent(currentWeightGroup), {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    closeWeightModal();
+                    updateMulticastWeights();
+                }
+            } catch (e) {
+                console.log('Failed to delete weight:', e);
+            }
+        }
+
+        // Close weight modal on outside click
+        document.getElementById('weightModal').addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeWeightModal();
+            }
+        });
+
+        // Close weight modal on Escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && document.getElementById('weightModal').classList.contains('active')) {
+                closeWeightModal();
+            }
+        });
     </script>
+
+    <!-- Multicast Weight Modal -->
+    <style>
+        .weight-modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .weight-modal-overlay.active {
+            display: flex;
+        }
+
+        .weight-modal {
+            background: #1c2128;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 500px;
+        }
+
+        .weight-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            border-bottom: 1px solid #30363d;
+        }
+
+        .weight-modal-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+
+        .weight-modal-title span {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: #8b949e;
+            margin-left: 8px;
+        }
+
+        .weight-modal-close {
+            background: none;
+            border: none;
+            color: #8b949e;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1;
+        }
+
+        .weight-modal-close:hover {
+            color: #f0f6fc;
+        }
+
+        .weight-modal-body {
+            padding: 20px;
+        }
+
+        .weight-form-group {
+            margin-bottom: 16px;
+        }
+
+        .weight-form-group label {
+            display: block;
+            font-size: 12px;
+            color: #8b949e;
+            margin-bottom: 6px;
+        }
+
+        .weight-form-group input {
+            width: 100%;
+            padding: 10px 12px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #e6edf3;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+        }
+
+        .weight-form-group input:focus {
+            outline: none;
+            border-color: #58a6ff;
+        }
+
+        .weight-info {
+            font-size: 11px;
+            color: #484f58;
+            margin-top: 4px;
+        }
+
+        .weight-modal-footer {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+            padding: 16px 20px;
+            border-top: 1px solid #30363d;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            border: none;
+        }
+
+        .btn-cancel {
+            background: #30363d;
+            color: #e6edf3;
+        }
+
+        .btn-cancel:hover {
+            background: #484f58;
+        }
+
+        .btn-save {
+            background: #238636;
+            color: white;
+        }
+
+        .btn-save:hover {
+            background: #2ea043;
+        }
+
+        .btn-delete {
+            background: #da3633;
+            color: white;
+        }
+
+        .btn-delete:hover {
+            background: #f85149;
+        }
+
+        .weight-success {
+            color: #3fb950;
+            font-size: 12px;
+            margin-top: 8px;
+            display: none;
+        }
+
+        .weight-error {
+            color: #f85149;
+            font-size: 12px;
+            margin-top: 8px;
+            display: none;
+        }
+    </style>
+
+    <div class="weight-modal-overlay" id="weightModal">
+        <div class="weight-modal">
+            <div class="weight-modal-header">
+                <div class="weight-modal-title">
+                    Multicast Weight Settings
+                    <span id="modalWeightGroup"></span>
+                </div>
+                <button class="weight-modal-close" onclick="closeWeightModal()">&times;</button>
+            </div>
+            <div class="weight-modal-body">
+                <div class="weight-form-group" id="weightGroupInput">
+                    <label>Multicast Group Address (组播组地址)</label>
+                    <input type="text" id="weightGroup" placeholder="e.g., 239.255.255.250">
+                </div>
+                <div class="weight-form-group">
+                    <label>Latency Weight (延迟权重)</label>
+                    <input type="number" id="weightLatency" step="0.1" min="0" max="1" value="1.0">
+                    <div class="weight-info">Range: [0, 1]. Higher = prefer low latency paths</div>
+                </div>
+                <div class="weight-form-group">
+                    <label>Bandwidth Weight (带宽权重)</label>
+                    <input type="number" id="weightBandwidth" step="0.1" min="0" max="1" value="1.0">
+                    <div class="weight-info">Range: [0, 1]. Higher = prefer high bandwidth paths</div>
+                </div>
+                <div class="weight-form-group">
+                    <label>Loss Weight (丢包权重)</label>
+                    <input type="number" id="weightLoss" step="0.1" min="0" max="1" value="1.0">
+                    <div class="weight-info">Range: [0, 1]. Higher = prefer low loss paths</div>
+                </div>
+                <div class="weight-success" id="weightSuccess">Weights saved successfully!</div>
+                <div class="weight-error" id="weightError">Failed to save weights</div>
+            </div>
+            <div class="weight-modal-footer">
+                <button class="btn btn-delete" onclick="deleteWeight()">Reset to Default</button>
+                <button class="btn btn-cancel" onclick="closeWeightModal()">Cancel</button>
+                <button class="btn btn-save" onclick="saveWeight()">Save</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
