@@ -47,6 +47,8 @@ class QoSController(app_manager.RyuApp):
         self.multicast_flow_installed = set()
         # 组播源节点记录: {组播组地址: 源节点IP}
         self.multicast_sources = {}
+        # 组播权重配置: {组播组地址: {'latency': 1.0, 'bandwidth': 1.0, 'loss': 1.0}}
+        self.multicast_weights = {}
 
         # 拓扑相关 - 使用 networkx DiGraph
         self.graph = nx.DiGraph()        # 保存完整拓扑（节点=交换机，边=链路）
@@ -732,9 +734,15 @@ class QoSController(app_manager.RyuApp):
             loss_matrix = nx.attr_matrix(self.graph, edge_attr='loss', rc_order=self.adj_matrix_nodes, dtype=np.float32)
 
             # 调用智能组播路由构建算法构建组播路由, 1-based:source_node,destination_group
+            # 获取该组播组的权重配置，默认为 1.0
+            weights = self.multicast_weights.get(multicast_addr,
+                                                 {'latency': 1.0, 'bandwidth': 1.0, 'loss': 1.0})
             is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, bandwidth_matrix, loss_matrix,
                                                          source_node=src_switch_id,
-                                                         destination_group=member_id_list)
+                                                         destination_group=member_id_list,
+                                                         latency_weight=weights['latency'],
+                                                         bandwidth_weight=weights['bandwidth'],
+                                                         loss_weight=weights['loss'])
             if is_success:
                 # 将邻接矩阵的双向性变成从源到目的集合的单向性矩阵（BFS）
                 src_idx = self.adj_matrix_nodes.index(src_switch_dpid)
@@ -1285,6 +1293,58 @@ class TopologyController(ControllerBase):
                 'dst_host': flow_info['dst_host']
             })
         body = json.dumps(flows, ensure_ascii=False).encode('utf-8')
+        return Response(content_type='application/json; charset=UTF-8', body=body)
+
+    @route('multicast', '/multicast/weights', methods=['GET'])
+    def get_all_multicast_weights(self, req):
+        """获取所有组播组的权重配置"""
+        body = json.dumps(self.switch_app.multicast_weights, ensure_ascii=False).encode('utf-8')
+        return Response(content_type='application/json; charset=UTF-8', body=body)
+
+    @route('multicast', '/multicast/weights/{multicast_addr}', methods=['GET'])
+    def get_multicast_weight(self, req, multicast_addr):
+        """获取指定组播组的权重配置"""
+        if multicast_addr in self.switch_app.multicast_weights:
+            weight = self.switch_app.multicast_weights[multicast_addr]
+        else:
+            weight = {'latency': 1.0, 'bandwidth': 1.0, 'loss': 1.0}
+        body = json.dumps(weight, ensure_ascii=False).encode('utf-8')
+        return Response(content_type='application/json; charset=UTF-8', body=body)
+
+    @route('multicast', '/multicast/weights/{multicast_addr}', methods=['PUT', 'POST'])
+    def set_multicast_weight(self, req, multicast_addr):
+        """设置指定组播组的权重配置"""
+        try:
+            data = json.loads(req.body.decode('utf-8'))
+            latency = float(data.get('latency_weight', 1.0))
+            bandwidth = float(data.get('bandwidth_weight', 1.0))
+            loss = float(data.get('loss_weight', 1.0))
+            # 验证权重值在 [0, 1] 范围内
+            if not (0 <= latency <= 1 and 0 <= bandwidth <= 1 and 0 <= loss <= 1):
+                error_msg = json.dumps({'success': False, 'error': 'Weight values must be in range [0, 1]'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+            weight = {
+                'latency': latency,
+                'bandwidth': bandwidth,
+                'loss': loss
+            }
+            self.switch_app.multicast_weights[multicast_addr] = weight
+            self.switch_app.logger.info(f"[Multicast Weights] Set weights for {multicast_addr}: {weight}")
+            body = json.dumps({'success': True, 'weights': weight}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
+        except Exception as e:
+            error_msg = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+    @route('multicast', '/multicast/weights/{multicast_addr}', methods=['DELETE'])
+    def delete_multicast_weight(self, req, multicast_addr):
+        """删除指定组播组的权重配置，恢复默认值"""
+        if multicast_addr in self.switch_app.multicast_weights:
+            del self.switch_app.multicast_weights[multicast_addr]
+            self.switch_app.logger.info(f"[Multicast Weights] Deleted weights for {multicast_addr}")
+            body = json.dumps({'success': True}, ensure_ascii=False).encode('utf-8')
+        else:
+            body = json.dumps({'success': False, 'error': 'Group not found'}, ensure_ascii=False).encode('utf-8')
         return Response(content_type='application/json; charset=UTF-8', body=body)
 
     @route('topology', '/', methods=['GET'])
