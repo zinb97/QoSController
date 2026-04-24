@@ -762,6 +762,8 @@ class QoSController(app_manager.RyuApp):
             # 获取延迟、带宽、丢包矩阵
             latency_matrix = nx.attr_matrix(self.graph, edge_attr='delay', rc_order=self.adj_matrix_nodes, dtype=np.float32)
             bandwidth_matrix = nx.attr_matrix(self.graph, edge_attr='bw', rc_order=self.adj_matrix_nodes, dtype=np.float32)
+            load_matrix = nx.attr_matrix(self.graph, edge_attr='total_bps', rc_order=self.adj_matrix_nodes, dtype=np.float32)
+            available_bw_matrix = bandwidth_matrix - load_matrix
             loss_matrix = nx.attr_matrix(self.graph, edge_attr='loss', rc_order=self.adj_matrix_nodes, dtype=np.float32)
 
             # 调用智能组播路由构建算法构建组播路由, 1-based:source_node,destination_group
@@ -769,7 +771,7 @@ class QoSController(app_manager.RyuApp):
             weights = self.multicast_weights.get(multicast_addr,
                                                  {'latency': 1.0, 'bandwidth': 1.0, 'loss': 1.0})
             self.logger.info(f"[Multicast Route] Using weights for {multicast_addr}: latency={weights['latency']}, bandwidth={weights['bandwidth']}, loss={weights['loss']}")
-            is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, bandwidth_matrix, loss_matrix,
+            is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, available_bw_matrix, loss_matrix,
                                                          source_node=src_switch_id,
                                                          destination_group=member_id_list,
                                                          latency_weight=weights['latency'],
