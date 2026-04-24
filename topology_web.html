@@ -739,6 +739,12 @@
         let currentHosts = [];
         let currentLinks = [];
 
+        // Flow path animation state
+        let currentHighlightedPath = null;
+        let flowAnimationInterval = null;
+        let animationState = false;
+        let originalEdgeStates = {};  // Store original edge states for restoration
+
         // 层级颜色映射
         const levelColors = {
             1: { bg: '#e74c3c', border: '#c0392b', shadow: 'rgba(231, 76, 60, 0.3)' },  // 核心层 - 红色
@@ -833,6 +839,9 @@
                     if (!clickedId.toString().startsWith('host_')) {
                         openFlowModal(clickedId);
                     }
+                } else {
+                    // Clicked on empty space - clear flow animation
+                    clearFlowAnimation();
                 }
             });
 
@@ -965,8 +974,89 @@
         }
 
         function highlightFlowPath(pathDpids) {
-            // Highlight the path on the topology
-            console.log('Highlight path:', pathDpids);
+            // If same path is clicked again, toggle off animation
+            if (currentHighlightedPath &&
+                currentHighlightedPath.length === pathDpids.length &&
+                currentHighlightedPath.every((dpid, i) => dpid === pathDpids[i])) {
+                clearFlowAnimation();
+                return;
+            }
+
+            // Clear any existing animation first
+            clearFlowAnimation();
+
+            if (!pathDpids || pathDpids.length < 2) return;
+
+            currentHighlightedPath = pathDpids;
+            animationState = false;
+
+            // Store original edge dashes and find path edges
+            for (let i = 0; i < pathDpids.length - 1; i++) {
+                const fromDpid = pathDpids[i];
+                const toDpid = pathDpids[i + 1];
+
+                currentLinks.forEach((link, idx) => {
+                    const edgeId = 'link_' + idx;
+                    if ((link.src.dpid === fromDpid && link.dst.dpid === toDpid) ||
+                        (link.src.dpid === toDpid && link.dst.dpid === fromDpid)) {
+                        // Store original dashes only (not color, so load colors can still apply)
+                        originalEdgeStates[edgeId] = {
+                            dashes: edges.get(edgeId).dashes || false
+                        };
+                    }
+                });
+            }
+
+            // Start animation
+            flowAnimationInterval = setInterval(() => {
+                animationState = !animationState;
+                updateFlowPathAnimation(pathDpids, animationState);
+            }, 400);
+
+            // Apply initial animation state
+            updateFlowPathAnimation(pathDpids, animationState);
+        }
+
+        function updateFlowPathAnimation(pathDpids, state) {
+            // 复合格式: [长划线, 短间隙, 短划线, 短间隙] 交替变化产生流动感
+            const dashPattern = state ? [12, 4, 2, 4] : [2, 4, 12, 4];
+
+            for (let i = 0; i < pathDpids.length - 1; i++) {
+                const fromDpid = pathDpids[i];
+                const toDpid = pathDpids[i + 1];
+
+                currentLinks.forEach((link, idx) => {
+                    const edgeId = 'link_' + idx;
+                    if ((link.src.dpid === fromDpid && link.dst.dpid === toDpid) ||
+                        (link.src.dpid === toDpid && link.dst.dpid === fromDpid)) {
+                        edges.update({
+                            id: edgeId,
+                            dashes: dashPattern
+                        });
+                    }
+                });
+            }
+        }
+
+        function clearFlowAnimation() {
+            if (flowAnimationInterval) {
+                clearInterval(flowAnimationInterval);
+                flowAnimationInterval = null;
+            }
+
+            // Restore original edge dashes only
+            Object.keys(originalEdgeStates).forEach(edgeId => {
+                const original = originalEdgeStates[edgeId];
+                const edge = edges.get(edgeId);
+                if (edge) {
+                    edges.update({
+                        id: edgeId,
+                        dashes: original.dashes
+                    });
+                }
+            });
+            originalEdgeStates = {};
+            currentHighlightedPath = null;
         }
 
         function updateHostVisibility() {
