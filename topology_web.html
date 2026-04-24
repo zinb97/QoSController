@@ -1440,9 +1440,13 @@
                 return;
             }
 
-            const latency = parseFloat(document.getElementById('weightLatency').value) || 1.0;
-            const bandwidth = parseFloat(document.getElementById('weightBandwidth').value) || 1.0;
-            const loss = parseFloat(document.getElementById('weightLoss').value) || 1.0;
+            let latency = parseFloat(document.getElementById('weightLatency').value);
+            let bandwidth = parseFloat(document.getElementById('weightBandwidth').value);
+            let loss = parseFloat(document.getElementById('weightLoss').value);
+            // Handle NaN and invalid values, default to 1.0
+            if (isNaN(latency)) latency = 1.0;
+            if (isNaN(bandwidth)) bandwidth = 1.0;
+            if (isNaN(loss)) loss = 1.0;
 
             // Check if weights are all default (1.0, 1.0, 1.0)
             if (latency === 1.0 && bandwidth === 1.0 && loss === 1.0) {
