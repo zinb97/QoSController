@@ -51,7 +51,7 @@
 
         .logo-text span {
             font-size: 12px;
-            color: #8b949e;
+            color: #79c0ff;
         }
 
         .status-bar {
@@ -103,17 +103,17 @@
         .canvas-title {
             font-size: 14px;
             font-weight: 500;
-            color: #8b949e;
+            color: #c9d1d9;
         }
 
         .canvas-title span {
-            color: #58a6ff;
+            color: #79c0ff;
         }
 
         .last-update {
             font-family: 'JetBrains Mono', monospace;
             font-size: 12px;
-            color: #484f58;
+            color: #c9d1d9;
         }
 
         #mynetwork {
@@ -131,6 +131,12 @@
             border-left: 1px solid #30363d;
             padding: 16px;
             overflow-y: auto;
+            scrollbar-width: none;  /* Firefox */
+            -ms-overflow-style: none;  /* IE/Edge */
+        }
+
+        .sidebar::-webkit-scrollbar {
+            display: none;  /* Chrome/Safari/Opera */
         }
 
         .sidebar-section {
@@ -142,7 +148,7 @@
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            color: #484f58;
+            color: #79c0ff;
             margin-bottom: 12px;
             cursor: pointer;
             display: flex;
@@ -152,7 +158,7 @@
         }
 
         .section-title:hover {
-            color: #8b949e;
+            color: #a5d6ff;
         }
 
         .section-title::after {
@@ -472,6 +478,10 @@
             color: #58a6ff;
         }
 
+        .flow-table .index {
+            color: #79c0ff;
+        }
+
         .flow-table .match {
             color: #a5d6ff;
         }
@@ -554,6 +564,19 @@
         </div>
 
         <aside class="sidebar">
+            <div class="sidebar-section" style="margin-bottom: 12px;">
+                <button onclick="toggleAllSections()" id="toggleAllBtn" style="
+                    width: 100%;
+                    padding: 8px 12px;
+                    background: #30363d;
+                    border: 1px solid #484f58;
+                    border-radius: 6px;
+                    color: #e6edf3;
+                    font-size: 12px;
+                    cursor: pointer;
+                    margin-bottom: 8px;
+                ">Collapse All</button>
+            </div>
             <div class="sidebar-section" id="statsSection">
                 <div class="section-title" onclick="toggleSection('statsSection')">Statistics</div>
                 <div class="stats-grid">
@@ -1245,6 +1268,22 @@
             section.classList.toggle('collapsed');
         }
 
+        function toggleAllSections() {
+            const btn = document.getElementById('toggleAllBtn');
+            const sections = document.querySelectorAll('.sidebar-section');
+            const allCollapsed = Array.from(sections).every(s => s.classList.contains('collapsed'));
+
+            if (allCollapsed) {
+                // Expand all
+                sections.forEach(s => s.classList.remove('collapsed'));
+                btn.textContent = 'Collapse All';
+            } else {
+                // Collapse all
+                sections.forEach(s => s.classList.add('collapsed'));
+                btn.textContent = 'Expand All';
+            }
+        }
+
         window.onload = function() {
             initNetwork();
             updateTopology();
@@ -1305,9 +1344,13 @@
                 }
 
                 let tableHtml = `
+                    <div style="margin-bottom: 12px; color: #79c0ff; font-size: 13px;">
+                        Total: ${flows.length} flow rule(s)
+                    </div>
                     <table class="flow-table">
                         <thead>
                             <tr>
+                                <th>#</th>
                                 <th>Priority</th>
                                 <th>Match</th>
                                 <th>Actions</th>
@@ -1319,7 +1362,7 @@
                         <tbody>
                 `;
 
-                flows.forEach(flow => {
+                flows.forEach((flow, index) => {
                     const priority = flow.priority || 0;
                     const durationSec = flow.duration_sec || 0;
                     const idleTimeout = flow.idle_timeout || 0;
@@ -1409,6 +1452,7 @@
 
                     tableHtml += `
                         <tr>
+                            <td class="index">${index + 1}</td>
                             <td class="priority">${priority}</td>
                             <td class="match">${matchStr || '-'}</td>
                             <td class="actions">${actionsStr || '-'}</td>
