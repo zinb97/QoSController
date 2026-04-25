@@ -27,6 +27,7 @@ sudo mn --topo linear,2 --controller remote,ip=127.0.0.1,port=6653 --switch ovsk
 sudo python netSim.py -t dual    # 双交换机测试拓扑
 sudo python netSim.py -t ring    # 环形网络拓扑（默认6节点，可通过参数调整）
 sudo python netSim.py -t net     # 骨干网拓扑（默认层级3）
+sudo python netSim.py -t mcast   # 组播测试拓扑（层级化: 2-3-3-6）
 sudo python netSim.py net -l 3 -f # 层级3 + 全量23省接入节点
 ```
 
@@ -73,6 +74,7 @@ app/                    # RYU 应用示例集（含 ofctl/ 子模块）
 netSim.py               # Mininet 拓扑生成器
   ├── DualSwitchTopo     # 双交换机测试拓扑（2主机+2交换机）
   ├── RingTopo           # 环形网络（n个交换机+主机，默认6节点）
+  ├── McastTestTopo      # 组播测试拓扑（层级化: 2-3-3-6）
   └── ChinaBackboneTopo  # 骨干网分层拓扑
 
 client.py               # 强化学习组播树构建客户端（调用 gRPC 服务构建组播树）
@@ -94,10 +96,10 @@ multicast_pb2_grpc.py  # gRPC 组播服务生成的 RPC 存根（调用远端 RL
 | DSCP值 | 路由策略 | 说明 |
 |--------|----------|------|
 | 0/未设置 | 最短跳数 | hop count（默认） |
-| 4 | 带宽优先 | max-bw，选取带宽最大的路径 |
-| 8 | 丢包率优先 | min-loss，选取丢包率最低的路径 |
-| 16 | 负载均衡 | min-load，选取剩余带宽最大的路径 |
-| 32 | 延迟优先 | min-delay，选取总延迟最小的路径 |
+| 1 | 带宽优先 | max-bw，选取带宽最大的路径 |
+| 2 | 丢包率优先 | min-loss，选取丢包率最低的路径 |
+| 4 | 负载均衡 | min-load，选取剩余带宽最大的路径 |
+| 8 | 延迟优先 | min-delay，选取总延迟最小的路径 |
 
 ## DPID 规范（ChinaBackboneTopo）
 
