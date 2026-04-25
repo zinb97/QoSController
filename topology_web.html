@@ -795,6 +795,17 @@
                     </div>
                 </div>
             </div>
+
+            <div class="sidebar-section" id="multicastFlowsSection">
+                <div class="section-title" onclick="toggleSection('multicastFlowsSection')">Multicast Active Flows</div>
+                <div class="switch-list" id="multicastFlowList">
+                    <div class="switch-item">
+                        <div class="switch-info">
+                            <div class="switch-name">Loading...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </aside>
     </main>
 
@@ -1076,6 +1087,41 @@
             }
         }
 
+        async function updateMulticastActiveFlows() {
+            try {
+                const response = await fetch('/multicast/active_flows');
+                if (!response.ok) return;
+                const flows = await response.json();
+
+                const flowList = document.getElementById('multicastFlowList');
+                if (!flows || flows.length === 0) {
+                    flowList.innerHTML = `
+                        <div class="switch-item">
+                            <div class="switch-info">
+                                <div class="switch-name">No multicast active flows</div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    flowList.innerHTML = flows.map(f => {
+                        const pathStr = f.path.join(' → ');
+                        const edgesJson = JSON.stringify(f.path_edges).replace(/"/g, '&quot;');
+                        return `
+                            <div class="switch-item" onclick="highlightMulticastPath(${edgesJson})" style="cursor: pointer;">
+                                <div class="switch-icon" style="background:#9b59b6">★</div>
+                                <div class="switch-info">
+                                    <div class="switch-name">${f.multicast_addr}</div>
+                                    <div class="switch-dpid">${f.source_ip} → ${pathStr}</div>
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                }
+            } catch (e) {
+                console.log('Failed to fetch multicast active flows:', e);
+            }
+        }
+
         function highlightFlowPath(pathDpids) {
             // If same path is clicked again, toggle off animation
             if (currentHighlightedPath &&
@@ -1160,6 +1206,74 @@
             });
             originalEdgeStates = {};
             currentHighlightedPath = null;
+        }
+
+        // Highlight multicast tree edges (edges is array of [from, to])
+        function highlightMulticastPath(pathEdges) {
+            // Toggle off if same edges clicked
+            if (currentHighlightedPath &&
+                currentHighlightedPath.length === pathEdges.length &&
+                currentHighlightedPath.every((e, i) => e[0] === pathEdges[i][0] && e[1] === pathEdges[i][1])) {
+                clearFlowAnimation();
+                return;
+            }
+
+            clearFlowAnimation();
+
+            if (!pathEdges || pathEdges.length === 0) return;
+
+            // Convert pathEdges to integers for consistent comparison
+            const allEdges = pathEdges.map(e => [parseInt(e[0]), parseInt(e[1])]);
+
+            // Find matching link indices and store original state
+            allEdges.forEach(([fromDpid, toDpid]) => {
+                currentLinks.forEach((link, idx) => {
+                    const edgeId = 'link_' + idx;
+                    const linkSrc = parseInt(link.src.dpid);
+                    const linkDst = parseInt(link.dst.dpid);
+                    if ((linkSrc === fromDpid && linkDst === toDpid) ||
+                        (linkSrc === toDpid && linkDst === fromDpid)) {
+                        originalEdgeStates[edgeId] = {
+                            dashes: edges.get(edgeId).dashes || false
+                        };
+                    }
+                });
+            });
+
+            currentHighlightedPath = allEdges;
+            animationState = false;
+
+            // Start animation
+            flowAnimationInterval = setInterval(() => {
+                animationState = !animationState;
+                const dashPattern = animationState ? [12, 4, 2, 4] : [2, 4, 12, 4];
+
+                allEdges.forEach(([fromDpid, toDpid]) => {
+                    currentLinks.forEach((link, idx) => {
+                        const edgeId = 'link_' + idx;
+                        const linkSrc = parseInt(link.src.dpid);
+                        const linkDst = parseInt(link.dst.dpid);
+                        if ((linkSrc === fromDpid && linkDst === toDpid) ||
+                            (linkSrc === toDpid && linkDst === fromDpid)) {
+                            edges.update({ id: edgeId, dashes: dashPattern });
+                        }
+                    });
+                });
+            }, 400);
+
+            // Apply initial state
+            const dashPattern = animationState ? [12, 4, 2, 4] : [2, 4, 12, 4];
+            allEdges.forEach(([fromDpid, toDpid]) => {
+                currentLinks.forEach((link, idx) => {
+                    const edgeId = 'link_' + idx;
+                    const linkSrc = parseInt(link.src.dpid);
+                    const linkDst = parseInt(link.dst.dpid);
+                    if ((linkSrc === fromDpid && linkDst === toDpid) ||
+                        (linkSrc === toDpid && linkDst === fromDpid)) {
+                        edges.update({ id: edgeId, dashes: dashPattern });
+                    }
+                });
+            });
         }
 
         function updateHostVisibility() {
@@ -1350,10 +1464,12 @@
             updateTopology();
             updateActiveFlows();
             updateMulticastWeights();
+            updateMulticastActiveFlows();
             loadRoutingAlgorithm();
             setInterval(updateTopology, 2000);
             setInterval(updateActiveFlows, 2000);
             setInterval(updateMulticastWeights, 5000);
+            setInterval(updateMulticastActiveFlows, 2000);
         };
 
         // Switch click handler for flow table
