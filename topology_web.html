@@ -532,6 +532,21 @@
             color: #8b949e;
         }
 
+        .loading-spinner {
+            width: 50px;
+            height: 50px;
+            margin: 0 auto;
+            border: 4px solid #30363d;
+            border-top: 4px solid #79c0ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
         .error {
             text-align: center;
             padding: 40px;
@@ -824,6 +839,19 @@
             </div>
             <div class="modal-body" id="modalBody">
                 <div class="loading">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="modal-overlay" id="loadingOverlay">
+        <div class="modal" style="width: 280px; text-align: center;">
+            <div class="modal-header" style="justify-content: center;">
+                <div class="modal-title">Processing...</div>
+            </div>
+            <div class="modal-body" style="padding: 30px 20px;">
+                <div class="loading-spinner"></div>
+                <div style="margin-top: 20px; color: #c9d1d9; font-size: 14px;" id="loadingText">Please wait</div>
             </div>
         </div>
     </div>
@@ -1493,6 +1521,15 @@
             }
         }
 
+        function showLoading(message) {
+            document.getElementById('loadingText').textContent = message || 'Please wait';
+            document.getElementById('loadingOverlay').classList.add('active');
+        }
+
+        function hideLoading() {
+            document.getElementById('loadingOverlay').classList.remove('active');
+        }
+
         async function fetchFlowTable(dpid) {
             const modalBody = document.getElementById('modalBody');
             modalBody.innerHTML = '<div class="loading">Loading...</div>';
@@ -1814,6 +1851,7 @@
             }
 
             try {
+                showLoading('Saving multicast weights...');
                 const response = await fetch('/multicast/weights/' + encodeURIComponent(group), {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
@@ -1823,6 +1861,7 @@
                         loss_weight: loss
                     })
                 });
+                hideLoading();
 
                 if (response.ok) {
                     document.getElementById('weightSuccess').style.display = 'block';
@@ -1836,6 +1875,7 @@
                     document.getElementById('weightError').style.display = 'block';
                 }
             } catch (e) {
+                hideLoading();
                 document.getElementById('weightError').textContent = 'Failed to save weights';
                 document.getElementById('weightError').style.display = 'block';
             }
@@ -1848,15 +1888,18 @@
             }
 
             try {
+                showLoading('Deleting multicast weight...');
                 const response = await fetch('/multicast/weights/' + encodeURIComponent(currentWeightGroup), {
                     method: 'DELETE'
                 });
+                hideLoading();
 
                 if (response.ok) {
                     closeWeightModal();
                     updateMulticastWeights();
                 }
             } catch (e) {
+                hideLoading();
                 console.log('Failed to delete weight:', e);
             }
         }
@@ -1913,15 +1956,24 @@
 
         async function selectAlgorithm(algorithm) {
             try {
+                showLoading(`Switching to ${algorithm === 'smart' ? 'Smart' : 'Dijkstra'} algorithm...`);
                 const response = await fetch('/routing/algorithm', {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ algorithm: algorithm })
                 });
+                const data = await response.json();
+                hideLoading();
                 if (response.ok) {
-                    updateAlgorithmUI(algorithm);
+                    if (data.unchanged) {
+                        console.log('Algorithm unchanged, no action taken');
+                    } else {
+                        updateAlgorithmUI(algorithm);
+                        updateMulticastActiveFlows();
+                    }
                 }
             } catch (e) {
+                hideLoading();
                 console.log('Failed to change routing algorithm:', e);
             }
         }
