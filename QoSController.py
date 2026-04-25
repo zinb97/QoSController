@@ -304,14 +304,17 @@ class QoSController(app_manager.RyuApp):
     # ==================== 拓扑事件回调 ====================
     @set_ev_cls(event.EventSwitchEnter)
     def switch_enter_handler(self, ev):
-        self.logger.info(f"交换机上线: DPID={ev.switch.dp.id}")
-        self.datapaths[ev.switch.dp.id] = ev.switch.dp
-        self.update_topology()
+        try:
+            self.logger.info(f"交换机上线: {self.sw_name(ev.switch.dp.id)} DPID={ev.switch.dp.id:016x}")
+            self.datapaths[ev.switch.dp.id] = ev.switch.dp
+            self.update_topology()
+        except Exception as e:
+            self.logger.info(f'Event SwitchEnter {e}')
 
     @set_ev_cls(event.EventSwitchLeave)
     def switch_leave_handler(self, ev):
         dpid = ev.switch.dp.id
-        self.logger.info(f"交换机离线: DPID={dpid}")
+        self.logger.info(f"交换机离线: {dpid} DPID={dpid}")
         self.datapaths.pop(dpid, None)
         self.update_topology()
         # 重新计算受影响的流
@@ -319,14 +322,16 @@ class QoSController(app_manager.RyuApp):
 
     @set_ev_cls(event.EventLinkAdd)
     def link_add_handler(self, ev):
-        self.logger.info(f"新增链路: {ev.link.src.dpid}:{ev.link.src.port_no} <-> {ev.link.dst.dpid}:{ev.link.dst.port_no}")
+        self.logger.info(f"新增链路: {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> "
+                         f"{self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
         self.update_topology()
         # 检查是否有更优路径可更新
         self._check_update_paths()
 
     @set_ev_cls(event.EventLinkDelete)
     def link_delete_handler(self, ev):
-        self.logger.info(f"删除链路: {ev.link.src.dpid}:{ev.link.src.port_no} <-> {ev.link.dst.dpid}:{ev.link.dst.port_no}")
+        self.logger.info(f"删除链路: {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> "
+                         f"{self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
         self.update_topology()
         # 重新计算受影响的流
         self._recalculate_affected_flows()
@@ -392,7 +397,7 @@ class QoSController(app_manager.RyuApp):
         mod = parser.OFPFlowMod(datapath=datapath, command=ofproto.OFPFC_DELETE,
                                 out_port=ofproto.OFPP_ANY, out_group=ofproto.OFPG_ANY)
         datapath.send_msg(mod)
-        self.logger.info(f"[Switch Init] Clear all flow entries on Switch {datapath.id}")
+        self.logger.info(f"[Switch Init] Init flows on Switch {self.sw_name(datapath.id)}")
 
         # 表项0：默认上送控制器
         match = parser.OFPMatch()
@@ -447,28 +452,30 @@ class QoSController(app_manager.RyuApp):
     @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
     def _flow_removed_handler(self, ev):
         """处理交换机流表因 idle_timeout 过期而被删除的事件"""
-        msg = ev.msg
-        datapath = msg.datapath
-        ofproto = datapath.ofproto
-        dpid = datapath.id
+        try:
+            msg = ev.msg
+            datapath = msg.datapath
+            ofproto = datapath.ofproto
+            if msg.reason not in (ofproto.OFPRR_IDLE_TIMEOUT, ofproto.OFPRR_HARD_TIMEOUT):
+                return
+            dpid = datapath.id
 
-        match = msg.match
-        # 从 match 中提取流信息
-        ipv4_src = match.get('ipv4_src')
-        ipv4_dst = match.get('ipv4_dst')
-        ip_dscp = match.get('ip_dscp', 0)
+            match = msg.match
+            # 从 match 中提取流信息
+            ipv4_src = match.get('ipv4_src')
+            ipv4_dst = match.get('ipv4_dst')
+            ip_dscp = match.get('ip_dscp', 0)
+            if not ipv4_src or not ipv4_dst:
+                return
 
-        if msg.reason not in (ofproto.OFPRR_IDLE_TIMEOUT, ofproto.OFPRR_HARD_TIMEOUT):
-            return
-        if not ipv4_src or not ipv4_dst:
-            return
-
-        if ipv4_src and ipv4_dst:
-            flow_key = ipv4_src, ipv4_dst, ip_dscp
-            if flow_key in self.active_flows:
-                del self.active_flows[flow_key]
-                self.logger.info(f"[FlowRemoved] Flow expired on SW:{self.sw_name(dpid)}: {ipv4_src} -> {ipv4_dst} "
-                                 f"{'(dscp={ip_dscp})' if ip_dscp else ''}, removed from active_flows")
+            if ipv4_src and ipv4_dst:
+                flow_key = ipv4_src, ipv4_dst, ip_dscp
+                if flow_key in self.active_flows:
+                    del self.active_flows[flow_key]
+                    self.logger.info(f"[FlowRemoved] Flow expired on SW:{self.sw_name(dpid)}: {ipv4_src} -> {ipv4_dst} "
+                                     f"{'(dscp={ip_dscp})' if ip_dscp else ''}, removed from active_flows")
+        except Exception as e:
+            self.logger.info(f'Event OFPFlowRemoved {e}')
 
     # ==================== ARP 处理 ====================
     def handle_arp(self, datapath, in_port, msg, eth_pkt, arp_pkt):
