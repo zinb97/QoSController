@@ -1,3 +1,4 @@
+import traceback
 from typing import List
 
 from ryu.base import app_manager
@@ -11,6 +12,7 @@ from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 from ryu.lib import hub
 from ryu.lib.packet import packet, ethernet, arp, ipv4, icmp, tcp, udp, ipv6, igmp
 from collections import deque
+import threading
 
 import json
 import os
@@ -65,6 +67,8 @@ class QoSController(app_manager.RyuApp):
         self.port_stats = {}            # {dpid: {port_no: {'rx_bytes': ..., 'tx_bytes': ..., 'timestamp': ...}}}
         self.port_stats_prev = {}       # {dpid: {port_no: {'rx_bytes': ..., 'tx_bytes': ..., 'timestamp': ...}}}
 
+        self._lock = threading.Lock()
+
         self.switch_name = utils.get_switch_name()
 
         # 注册 Web API
@@ -77,7 +81,8 @@ class QoSController(app_manager.RyuApp):
     def _topology_loop(self):
         while True:
             try:
-                self.update_topology()
+                with self._lock:
+                    self.update_topology()
             except Exception as e:
                 self.logger.warning(f"Topology loop update failed: {e}")
             hub.sleep(3)
@@ -86,7 +91,8 @@ class QoSController(app_manager.RyuApp):
         """定期请求交换机端口统计信息"""
         while True:
             try:
-                self._request_port_stats()
+                with self._lock:
+                    self._request_port_stats()
             except Exception as e:
                 self.logger.warning(f"Port stats request failed: {e}")
             hub.sleep(2)
@@ -306,17 +312,19 @@ class QoSController(app_manager.RyuApp):
     def switch_enter_handler(self, ev):
         try:
             self.logger.info(f"交换机上线: {self.sw_name(ev.switch.dp.id)} DPID={ev.switch.dp.id:016x}")
-            self.datapaths[ev.switch.dp.id] = ev.switch.dp
-            self.update_topology()
+            with self._lock:
+                self.datapaths[ev.switch.dp.id] = ev.switch.dp
+                self.update_topology()
         except Exception as e:
-            self.logger.info(f'Event SwitchEnter {e}')
+            self.logger.info(f'Event SwitchEnter {self.sw_name(ev.switch.dp.id)} {e}')
 
     @set_ev_cls(event.EventSwitchLeave)
     def switch_leave_handler(self, ev):
         dpid = ev.switch.dp.id
         self.logger.info(f"交换机离线: {dpid} DPID={dpid}")
-        self.datapaths.pop(dpid, None)
-        self.update_topology()
+        with self._lock:
+            self.datapaths.pop(dpid, None)
+            self.update_topology()
         # 重新计算受影响的流
         self._recalculate_affected_flows()
 
@@ -324,7 +332,8 @@ class QoSController(app_manager.RyuApp):
     def link_add_handler(self, ev):
         self.logger.info(f"新增链路: {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> "
                          f"{self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
-        self.update_topology()
+        with self._lock:
+            self.update_topology()
         # 检查是否有更优路径可更新
         self._check_update_paths()
 
@@ -332,7 +341,8 @@ class QoSController(app_manager.RyuApp):
     def link_delete_handler(self, ev):
         self.logger.info(f"删除链路: {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> "
                          f"{self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
-        self.update_topology()
+        with self._lock:
+            self.update_topology()
         # 重新计算受影响的流
         self._recalculate_affected_flows()
 
@@ -493,7 +503,8 @@ class QoSController(app_manager.RyuApp):
         if arp_htype != 1 or arp_ptype != 0x0800:
             self.logger.debug(f"[PacketIn] 非以太网IPv4 ARP，忽略: HTYPE={arp_htype}, PTYPE={hex(arp_ptype)}")
             return
-        self.logger.info(f"[PacketIn] SW:{dpid} {arp_op_name} ETH:{src_eth}-->{dst_eth} | ARP:{src_mac}({src_ip_arp})-->{dst_mac}({dst_ip_arp})")
+        self.logger.info(f"[PacketIn] {self.sw_name(dpid)} {arp_op_name} ETH:{src_eth}-->{dst_eth} "
+                         f"| ARP:{src_mac}({src_ip_arp})-->{dst_mac}({dst_ip_arp})")
 
         self._learn_host(dpid, in_port, src_eth, src_ip_arp, proto_tag="ARP")
 
@@ -502,7 +513,7 @@ class QoSController(app_manager.RyuApp):
             if dst_ip_arp in self.ip_to_mac:
                 target_mac = self.ip_to_mac[dst_ip_arp]
                 self.send_arp_reply(datapath, eth_pkt, src_mac, src_ip_arp, target_mac, dst_ip_arp, in_port)
-                self.logger.info(f"[ARP Reply] SW:{dpid} Reply {dst_ip_arp} is {target_mac}")
+                self.logger.info(f"[ARP Reply] {self.sw_name(dpid)} Reply {dst_ip_arp} is {target_mac}")
             else:
                 self.flood_arp_to_all_switches(msg.data)
                 self.logger.info(f"[ARP Flood] unknown IP {dst_ip_arp}")
@@ -1117,14 +1128,10 @@ class QoSController(app_manager.RyuApp):
 
     # ==================== 拓扑更新 ====================
     def update_topology(self):
-        try:
-            switch_list = get_switch(self, None)
-            link_list = get_link(self, None)
-            host_list = get_host(self, None)
-        except TypeError:
-            switch_list = get_switch(self)
-            link_list = get_link(self)
-            host_list = get_host(self)
+
+        switch_list = get_switch(self)
+        link_list = get_link(self)
+        host_list = get_host(self)
 
         # 重建 DiGraph
         self.graph = nx.DiGraph()
@@ -1139,7 +1146,7 @@ class QoSController(app_manager.RyuApp):
             self.graph.add_node(s.dp.id, name=sw_name, level=level, ports=ports)
 
         # 添加链路边
-        for l in link_list:
+        for l in list(link_list):
             src_dpid = l.src.dpid
             src_port = l.src.port_no
             dst_dpid = l.dst.dpid
