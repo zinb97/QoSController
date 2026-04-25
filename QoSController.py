@@ -1522,9 +1522,42 @@ class TopologyController(ControllerBase):
             if algorithm not in ['dijkstra', 'smart']:
                 error_msg = json.dumps({'success': False, 'error': 'Invalid algorithm. Must be dijkstra or smart'}, ensure_ascii=False).encode('utf-8')
                 return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+            # 如果算法相同，不做处理
+            if self.switch_app.routing_algorithm == algorithm:
+                self.switch_app.logger.info(f"[Routing] Algorithm unchanged ({algorithm}), skipping")
+                body = json.dumps({'success': True, 'algorithm': algorithm, 'reinstalled': [], 'skipped': [], 'unchanged': True}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=body)
+
             self.switch_app.routing_algorithm = algorithm
             self.switch_app.logger.info(f"[Routing] Algorithm changed to: {algorithm}")
-            body = json.dumps({'success': True, 'algorithm': algorithm}, ensure_ascii=False).encode('utf-8')
+
+            # 重新安装所有组播组的流规则（每个组播组间隔5秒）
+            reinstalled = []
+            skipped = []
+            for multicast_addr in list(self.switch_app.multicast_groups.keys()):
+                # 检查是否有源IP
+                if multicast_addr not in self.switch_app.multicast_sources:
+                    skipped.append({'group': multicast_addr, 'reason': 'no source IP'})
+                    continue
+                # 检查是否有组成员
+                if multicast_addr not in self.switch_app.multicast_groups or not self.switch_app.multicast_groups[multicast_addr]:
+                    skipped.append({'group': multicast_addr, 'reason': 'no members'})
+                    continue
+                # 删除已有的流规则
+                self.switch_app._delete_multicast_flows(multicast_addr)
+                # 重新安装流规则
+                success = self.switch_app._install_multicast_flow_rules(multicast_addr)
+                if success:
+                    reinstalled.append(multicast_addr)
+                else:
+                    skipped.append({'group': multicast_addr, 'reason': 'installation failed'})
+
+                # 每个组播组之间间隔5秒
+                time.sleep(5)
+
+            self.switch_app.logger.info(f"[Routing] Reinstalled {len(reinstalled)} multicast flows, skipped {len(skipped)}")
+            body = json.dumps({'success': True, 'algorithm': algorithm, 'reinstalled': reinstalled, 'skipped': skipped}, ensure_ascii=False).encode('utf-8')
             return Response(content_type='application/json; charset=UTF-8', body=body)
         except Exception as e:
             error_msg = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
