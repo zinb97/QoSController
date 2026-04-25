@@ -1223,16 +1223,16 @@
             if (!pathEdges || pathEdges.length === 0) return;
 
             // Convert pathEdges to integers for consistent comparison
-            const allEdges = pathEdges.map(e => [parseInt(e[0]), parseInt(e[1])]);
+            const allEdges = pathEdges.map(e => [Number(e[0]), Number(e[1])]);
 
-            // Find matching link indices and store original state
+            // Find matching link indices and store original state (directional match only)
             allEdges.forEach(([fromDpid, toDpid]) => {
                 currentLinks.forEach((link, idx) => {
                     const edgeId = 'link_' + idx;
                     const linkSrc = parseInt(link.src.dpid);
                     const linkDst = parseInt(link.dst.dpid);
-                    if ((linkSrc === fromDpid && linkDst === toDpid) ||
-                        (linkSrc === toDpid && linkDst === fromDpid)) {
+                    // Directional match: only match from->to direction
+                    if (linkSrc === fromDpid && linkDst === toDpid) {
                         originalEdgeStates[edgeId] = {
                             dashes: edges.get(edgeId).dashes || false
                         };
@@ -1253,8 +1253,8 @@
                         const edgeId = 'link_' + idx;
                         const linkSrc = parseInt(link.src.dpid);
                         const linkDst = parseInt(link.dst.dpid);
-                        if ((linkSrc === fromDpid && linkDst === toDpid) ||
-                            (linkSrc === toDpid && linkDst === fromDpid)) {
+                        // Directional match: only match from->to direction
+                        if (linkSrc === fromDpid && linkDst === toDpid) {
                             edges.update({ id: edgeId, dashes: dashPattern });
                         }
                     });
@@ -1268,8 +1268,8 @@
                     const edgeId = 'link_' + idx;
                     const linkSrc = parseInt(link.src.dpid);
                     const linkDst = parseInt(link.dst.dpid);
-                    if ((linkSrc === fromDpid && linkDst === toDpid) ||
-                        (linkSrc === toDpid && linkDst === fromDpid)) {
+                    // Directional match: only match from->to direction
+                    if (linkSrc === fromDpid && linkDst === toDpid) {
                         edges.update({ id: edgeId, dashes: dashPattern });
                     }
                 });
