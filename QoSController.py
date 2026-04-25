@@ -50,6 +50,8 @@ class QoSController(app_manager.RyuApp):
         self.multicast_sources = {}
         # 组播权重配置: {组播组地址: {'latency': 1.0, 'bandwidth': 1.0, 'loss': 1.0}}
         self.multicast_weights = {}
+        # 路由算法配置: 'dijkstra'=迪杰斯特拉算法, 'smart'=智能算法(默认)
+        self.routing_algorithm = 'smart'
 
         # 拓扑相关 - 使用 networkx DiGraph
         self.graph = nx.DiGraph()        # 保存完整拓扑（节点=交换机，边=链路）
@@ -1419,6 +1421,29 @@ class TopologyController(ControllerBase):
         else:
             body = json.dumps({'success': False, 'error': 'Group not found'}, ensure_ascii=False).encode('utf-8')
         return Response(content_type='application/json; charset=UTF-8', body=body)
+
+    @route('routing', '/routing/algorithm', methods=['GET'])
+    def get_routing_algorithm(self, req):
+        """获取当前路由算法配置"""
+        body = json.dumps({'algorithm': self.switch_app.routing_algorithm}, ensure_ascii=False).encode('utf-8')
+        return Response(content_type='application/json; charset=UTF-8', body=body)
+
+    @route('routing', '/routing/algorithm', methods=['PUT', 'POST'])
+    def set_routing_algorithm(self, req):
+        """设置路由算法: 'dijkstra' 或 'smart'"""
+        try:
+            data = json.loads(req.body.decode('utf-8'))
+            algorithm = data.get('algorithm', 'smart')
+            if algorithm not in ['dijkstra', 'smart']:
+                error_msg = json.dumps({'success': False, 'error': 'Invalid algorithm. Must be dijkstra or smart'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+            self.switch_app.routing_algorithm = algorithm
+            self.switch_app.logger.info(f"[Routing] Algorithm changed to: {algorithm}")
+            body = json.dumps({'success': True, 'algorithm': algorithm}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
+        except Exception as e:
+            error_msg = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
 
     @route('topology', '/', methods=['GET'])
     def index(self, req):

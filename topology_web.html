@@ -98,6 +98,8 @@
             justify-content: space-between;
             align-items: center;
             margin-bottom: 12px;
+            flex-wrap: wrap;
+            gap: 8px;
         }
 
         .canvas-title {
@@ -114,6 +116,26 @@
             font-family: 'JetBrains Mono', monospace;
             font-size: 12px;
             color: #c9d1d9;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .algo-badge {
+            padding: 4px 10px;
+            background: #238636;
+            border-radius: 12px;
+            font-size: 11px;
+            color: #fff;
+            font-weight: 500;
+        }
+
+        .algo-badge.dijkstra {
+            background: #1f6feb;
+        }
+
+        .algo-option:hover {
+            border-color: #484f58 !important;
         }
 
         #mynetwork {
@@ -178,7 +200,8 @@
         .sidebar-section.collapsed .switch-list,
         .sidebar-section.collapsed .legend,
         .sidebar-section.collapsed .stats-grid,
-        .sidebar-section.collapsed .toggle-row {
+        .sidebar-section.collapsed .toggle-row,
+        .sidebar-section.collapsed .routing-select {
             display: none;
         }
 
@@ -558,7 +581,10 @@
         <div class="canvas-container">
             <div class="canvas-header">
                 <div class="canvas-title">Network Topology (<span id="switchCount">0</span> switches)</div>
-                <div class="last-update">Last update: <span id="lastUpdate">--:--:--</span></div>
+                <div class="last-update">
+                    <span>Last update: <span id="lastUpdate">--:--:--</span></span>
+                    <span class="algo-badge" id="algoBadge">🧠 智能算法</span>
+                </div>
             </div>
             <div id="mynetwork"></div>
         </div>
@@ -576,6 +602,41 @@
                     cursor: pointer;
                     margin-bottom: 8px;
                 ">Collapse All</button>
+            </div>
+            <div class="sidebar-section" id="routingSection">
+                <div class="section-title" onclick="toggleSection('routingSection')">Routing Algorithm</div>
+                <div class="routing-select" style="margin-bottom: 8px;">
+                    <div class="algo-options" id="algoOptions" style="display: flex; flex-direction: column; gap: 6px;">
+                        <div class="algo-option" data-value="smart" onclick="selectAlgorithm('smart')" style="
+                            padding: 10px 12px;
+                            background: #1c2128;
+                            border: 1px solid #30363d;
+                            border-radius: 8px;
+                            cursor: pointer;
+                            transition: all 0.2s;
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                        ">
+                            <span style="font-size: 16px;">🧠</span>
+                            <span style="color: #c9d1d9; font-size: 13px;">智能算法</span>
+                        </div>
+                        <div class="algo-option" data-value="dijkstra" onclick="selectAlgorithm('dijkstra')" style="
+                            padding: 10px 12px;
+                            background: #1c2128;
+                            border: 1px solid #30363d;
+                            border-radius: 8px;
+                            cursor: pointer;
+                            transition: all 0.2s;
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                        ">
+                            <span style="font-size: 16px;">📊</span>
+                            <span style="color: #c9d1d9; font-size: 13px;">迪杰斯特拉算法</span>
+                        </div>
+                    </div>
+                </div>
             </div>
             <div class="sidebar-section" id="statsSection">
                 <div class="section-title" onclick="toggleSection('statsSection')">Statistics</div>
@@ -1289,6 +1350,7 @@
             updateTopology();
             updateActiveFlows();
             updateMulticastWeights();
+            loadRoutingAlgorithm();
             setInterval(updateTopology, 2000);
             setInterval(updateActiveFlows, 2000);
             setInterval(updateMulticastWeights, 5000);
@@ -1696,6 +1758,57 @@
                 closeWeightModal();
             }
         });
+
+        // ==================== Routing Algorithm Functions ====================
+        async function loadRoutingAlgorithm() {
+            try {
+                const response = await fetch('/routing/algorithm');
+                if (response.ok) {
+                    const data = await response.json();
+                    updateAlgorithmUI(data.algorithm);
+                }
+            } catch (e) {
+                console.log('Failed to load routing algorithm:', e);
+            }
+        }
+
+        function updateAlgorithmUI(algorithm) {
+            // Update badge in header
+            const badge = document.getElementById('algoBadge');
+            if (algorithm === 'smart') {
+                badge.textContent = '🧠 智能算法';
+                badge.className = 'algo-badge';
+            } else {
+                badge.textContent = '📊 迪杰斯特拉算法';
+                badge.className = 'algo-badge dijkstra';
+            }
+
+            // Update selection highlight in sidebar
+            document.querySelectorAll('.algo-option').forEach(el => {
+                if (el.dataset.value === algorithm) {
+                    el.style.borderColor = '#58a6ff';
+                    el.style.background = '#1f2937';
+                } else {
+                    el.style.borderColor = '#30363d';
+                    el.style.background = '#1c2128';
+                }
+            });
+        }
+
+        async function selectAlgorithm(algorithm) {
+            try {
+                const response = await fetch('/routing/algorithm', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ algorithm: algorithm })
+                });
+                if (response.ok) {
+                    updateAlgorithmUI(algorithm);
+                }
+            } catch (e) {
+                console.log('Failed to change routing algorithm:', e);
+            }
+        }
     </script>
 
     <!-- Multicast Weight Modal -->
