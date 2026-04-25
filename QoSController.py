@@ -52,6 +52,8 @@ class QoSController(app_manager.RyuApp):
         self.multicast_sources = {}
         # 组播权重配置: {组播组地址: {'latency': 1.0, 'bandwidth': 1.0, 'loss': 1.0}}
         self.multicast_weights = {}
+        # 路由算法配置: 'dijkstra'=迪杰斯特拉算法, 'smart'=智能算法(默认)
+        self.routing_algorithm = 'smart'
 
         # 拓扑相关 - 使用 networkx DiGraph
         self.graph = nx.DiGraph()        # 保存完整拓扑（节点=交换机，边=链路）
@@ -62,6 +64,17 @@ class QoSController(app_manager.RyuApp):
         # 活跃流表追踪
         # {(src_ip, dst_ip, dscp): {'path': [dpid1, dpid2, ...], 'path_switches': [...]}}
         self.active_flows = {}
+
+        # 组播活跃流追踪
+        # {multicast_addr: {
+        #     'source_ip': str,           # 组播源IP
+        #     'source_dpid': int,         # 源交换机DPID
+        #     'route_matrix': np.array,   # 组播树邻接矩阵
+        #     'member_ips': [str, ...],   # 组成员IP列表
+        #     'path': [(dpid1, dpid2), ...],  # 组播树路径列表
+        #     'installed_time': float      # 安装时间戳
+        # }}
+        self.multicast_active_flows = {}
 
         # 端口统计（用于计算链路负载）
         self.port_stats = {}            # {dpid: {port_no: {'rx_bytes': ..., 'tx_bytes': ..., 'timestamp': ...}}}
@@ -794,7 +807,8 @@ class QoSController(app_manager.RyuApp):
                                                          destination_group=member_id_list,
                                                          latency_weight=weights['latency'],
                                                          bandwidth_weight=weights['bandwidth'],
-                                                         loss_weight=weights['loss'])
+                                                         loss_weight=weights['loss'],
+                                                         algorithm_type=self.routing_algorithm)
             if is_success:
                 # 将邻接矩阵的双向性变成从源到目的集合的单向性矩阵（BFS）
                 src_idx = self.adj_matrix_nodes.index(src_switch_dpid)
@@ -862,6 +876,25 @@ class QoSController(app_manager.RyuApp):
                     self.multicast_flows[multicast_addr] = []
                 self.multicast_flows[multicast_addr].extend(installed_flows)
                 self.logger.info(f"[Multicast Flow] Group {multicast_addr} installed {len(installed_flows)} flow rules")
+
+                # 提取组播树路径列表
+                path_list = []
+                for i in range(net_size):
+                    for j in range(net_size):
+                        if route_matrix[i, j] == 1:
+                            path_list.append((self.adj_matrix_nodes[i], self.adj_matrix_nodes[j]))
+
+                # 更新组播活跃流信息
+                self.multicast_active_flows[multicast_addr] = {
+                    'source_ip': src_ip,
+                    'source_dpid': src_switch_dpid,
+                    'route_matrix': route_matrix,
+                    'member_ips': member_ips,
+                    'path': path_list,
+                    'installed_time': time.time()
+                }
+                self.logger.info(f"[Multicast Active Flow] Recorded active flow for group {multicast_addr}")
+
                 return True
 
             else:
@@ -906,6 +939,11 @@ class QoSController(app_manager.RyuApp):
         # 清空该组播组的流表记录
         self.multicast_flows[multicast_addr] = []
         self.multicast_flow_installed.discard(multicast_addr)
+
+        # 从组播活跃流中移除
+        if multicast_addr in self.multicast_active_flows:
+            del self.multicast_active_flows[multicast_addr]
+            self.logger.info(f"[Multicast Active Flow] Removed active flow for group {multicast_addr}")
 
     # ==================== 组播组管理 ====================
     def add_member_to_group(self, dpid, mac, src_ip, multicast_addr, in_port):
@@ -1344,6 +1382,55 @@ class TopologyController(ControllerBase):
         body = json.dumps(flows, ensure_ascii=False).encode('utf-8')
         return Response(content_type='application/json; charset=UTF-8', body=body)
 
+    @route('multicast', '/multicast/active_flows', methods=['GET'])
+    def get_multicast_active_flows(self, req):
+        """获取所有组播活跃流"""
+        flows = []
+        for multicast_addr, flow_info in self.switch_app.multicast_active_flows.items():
+            # path 是 [(dpid1, dpid2), ...] 元组列表，表示边 (from -> to)
+            # 将边列表转换为前端需要的格式：edges = [[from, to], ...]
+            path_edges = [[u, v] for (u, v) in flow_info['path']]
+            # 构建 BFS 顺序的节点列表，用于显示
+            path_dpids = []
+            if flow_info['path']:
+                src_dpid = flow_info['source_dpid']
+                adj = {}
+                for (u, v) in flow_info['path']:
+                    if u not in adj:
+                        adj[u] = []
+                    if v not in adj[u]:
+                        adj[u].append(v)
+                    if v not in adj:
+                        adj[v] = []
+
+                visited = set()
+                queue = [src_dpid]
+                visited.add(src_dpid)
+                while queue:
+                    curr = queue.pop(0)
+                    path_dpids.append(curr)
+                    for nxt in adj.get(curr, []):
+                        if nxt not in visited:
+                            visited.add(nxt)
+                            queue.append(nxt)
+
+            path_names = [self.switch_app.switch_name.get(f'{p:016x}', f'{p}') for p in path_dpids]
+            route_matrix_list = flow_info['route_matrix'].tolist() if hasattr(flow_info['route_matrix'], 'tolist') else flow_info['route_matrix']
+            flows.append({
+                'multicast_addr': multicast_addr,
+                'source_ip': flow_info['source_ip'],
+                'source_dpid': f'{flow_info["source_dpid"]:x}',
+                'source_switch': self.switch_app.switch_name.get(f'{flow_info["source_dpid"]:016x}', f'{flow_info["source_dpid"]:x}'),
+                'member_ips': flow_info['member_ips'],
+                'path': path_names,
+                'path_dpids': path_dpids,
+                'path_edges': path_edges,
+                'route_matrix': route_matrix_list,
+                'installed_time': flow_info['installed_time']
+            })
+        body = json.dumps(flows, ensure_ascii=False).encode('utf-8')
+        return Response(content_type='application/json; charset=UTF-8', body=body)
+
     @route('multicast', '/multicast/weights', methods=['GET'])
     def get_all_multicast_weights(self, req):
         """获取所有组播组的权重配置"""
@@ -1426,6 +1513,29 @@ class TopologyController(ControllerBase):
         else:
             body = json.dumps({'success': False, 'error': 'Group not found'}, ensure_ascii=False).encode('utf-8')
         return Response(content_type='application/json; charset=UTF-8', body=body)
+
+    @route('routing', '/routing/algorithm', methods=['GET'])
+    def get_routing_algorithm(self, req):
+        """获取当前路由算法配置"""
+        body = json.dumps({'algorithm': self.switch_app.routing_algorithm}, ensure_ascii=False).encode('utf-8')
+        return Response(content_type='application/json; charset=UTF-8', body=body)
+
+    @route('routing', '/routing/algorithm', methods=['PUT', 'POST'])
+    def set_routing_algorithm(self, req):
+        """设置路由算法: 'dijkstra' 或 'smart'"""
+        try:
+            data = json.loads(req.body.decode('utf-8'))
+            algorithm = data.get('algorithm', 'smart')
+            if algorithm not in ['dijkstra', 'smart']:
+                error_msg = json.dumps({'success': False, 'error': 'Invalid algorithm. Must be dijkstra or smart'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+            self.switch_app.routing_algorithm = algorithm
+            self.switch_app.logger.info(f"[Routing] Algorithm changed to: {algorithm}")
+            body = json.dumps({'success': True, 'algorithm': algorithm}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
+        except Exception as e:
+            error_msg = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
 
     @route('topology', '/', methods=['GET'])
     def index(self, req):

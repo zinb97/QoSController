@@ -7,6 +7,7 @@ import numpy as np
 def RL_multicast_tree(adjacency_matrix, latency_matrix, bandwidth_matrix, loss_matrix,
                      source_node, destination_group,
                      latency_weight=1.0, bandwidth_weight=1.0, loss_weight=1.0,
+                     algorithm_type = "smart",
                      server_address='192.168.10.21:50051'):
     """调用 gRPC 服务构建组播树"""
 
@@ -32,7 +33,8 @@ def RL_multicast_tree(adjacency_matrix, latency_matrix, bandwidth_matrix, loss_m
         loss_matrix=make_matrix(loss_matrix),
         latency_weight=latency_weight,
         bandwidth_weight=bandwidth_weight,
-        loss_weight=loss_weight
+        loss_weight=loss_weight,
+        algorithm_type=algorithm_type
     )
 
     # 调用 RPC

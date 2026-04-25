@@ -19,6 +19,8 @@ message MulticastRequest {
     float latency_weight = 7;
     float bandwidth_weight = 8;
     float loss_weight = 9;
+    // 路由算法类型: "dijkstra" 或 "drl" (默认)
+    string algorithm_type = 10;
 }
 
 message MulticastResponse {
