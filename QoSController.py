@@ -785,7 +785,8 @@ class QoSController(app_manager.RyuApp):
                                                          destination_group=member_id_list,
                                                          latency_weight=weights['latency'],
                                                          bandwidth_weight=weights['bandwidth'],
-                                                         loss_weight=weights['loss'])
+                                                         loss_weight=weights['loss'],
+                                                         algorithm_type=self.routing_algorithm)
             if is_success:
                 # 将邻接矩阵的双向性变成从源到目的集合的单向性矩阵（BFS）
                 src_idx = self.adj_matrix_nodes.index(src_switch_dpid)

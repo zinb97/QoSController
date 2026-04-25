@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0fmulticast.proto\x12\tmulticast\",\n\x0f\x41\x64jacencyMatrix\x12\x0b\n\x03row\x18\x01 \x03(\x02\x12\x0c\n\x04size\x18\x0c \x01(\x05\"\xda\x02\n\x10MulticastRequest\x12\x34\n\x10\x61\x64jacency_matrix\x18\x01 \x01(\x0b\x32\x1a.multicast.AdjacencyMatrix\x12\x13\n\x0bsource_node\x18\x02 \x01(\x05\x12\x19\n\x11\x64\x65stination_group\x18\x03 \x03(\x05\x12\x32\n\x0elatency_matrix\x18\x04 \x01(\x0b\x32\x1a.multicast.AdjacencyMatrix\x12\x34\n\x10\x62\x61ndwidth_matrix\x18\x05 \x01(\x0b\x32\x1a.multicast.AdjacencyMatrix\x12/\n\x0bloss_matrix\x18\x06 \x01(\x0b\x32\x1a.multicast.AdjacencyMatrix\x12\x16\n\x0elatency_weight\x18\x07 \x01(\x02\x12\x18\n\x10\x62\x61ndwidth_weight\x18\x08 \x01(\x02\x12\x13\n\x0bloss_weight\x18\t \x01(\x02\"X\n\x11MulticastResponse\x12\x32\n\x0emulticast_tree\x18\x01 \x01(\x0b\x32\x1a.multicast.AdjacencyMatrix\x12\x0f\n\x07success\x18\x02 \x01(\x08\x32\x63\n\x10MulticastService\x12O\n\x12\x42uildMulticastTree\x12\x1b.multicast.MulticastRequest\x1a\x1c.multicast.MulticastResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0fmulticast.proto\x12\tmulticast\",\n\x0f\x41\x64jacencyMatrix\x12\x0b\n\x03row\x18\x01 \x03(\x02\x12\x0c\n\x04size\x18\x0c \x01(\x05\"\xf2\x02\n\x10MulticastRequest\x12\x34\n\x10\x61\x64jacency_matrix\x18\x01 \x01(\x0b\x32\x1a.multicast.AdjacencyMatrix\x12\x13\n\x0bsource_node\x18\x02 \x01(\x05\x12\x19\n\x11\x64\x65stination_group\x18\x03 \x03(\x05\x12\x32\n\x0elatency_matrix\x18\x04 \x01(\x0b\x32\x1a.multicast.AdjacencyMatrix\x12\x34\n\x10\x62\x61ndwidth_matrix\x18\x05 \x01(\x0b\x32\x1a.multicast.AdjacencyMatrix\x12/\n\x0bloss_matrix\x18\x06 \x01(\x0b\x32\x1a.multicast.AdjacencyMatrix\x12\x16\n\x0elatency_weight\x18\x07 \x01(\x02\x12\x18\n\x10\x62\x61ndwidth_weight\x18\x08 \x01(\x02\x12\x13\n\x0bloss_weight\x18\t \x01(\x02\x12\x16\n\x0e\x61lgorithm_type\x18\n \x01(\t\"X\n\x11MulticastResponse\x12\x32\n\x0emulticast_tree\x18\x01 \x01(\x0b\x32\x1a.multicast.AdjacencyMatrix\x12\x0f\n\x07success\x18\x02 \x01(\x08\x32\x63\n\x10MulticastService\x12O\n\x12\x42uildMulticastTree\x12\x1b.multicast.MulticastRequest\x1a\x1c.multicast.MulticastResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,9 +34,9 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_ADJACENCYMATRIX']._serialized_start=30
   _globals['_ADJACENCYMATRIX']._serialized_end=74
   _globals['_MULTICASTREQUEST']._serialized_start=77
-  _globals['_MULTICASTREQUEST']._serialized_end=423
-  _globals['_MULTICASTRESPONSE']._serialized_start=425
-  _globals['_MULTICASTRESPONSE']._serialized_end=513
-  _globals['_MULTICASTSERVICE']._serialized_start=515
-  _globals['_MULTICASTSERVICE']._serialized_end=614
+  _globals['_MULTICASTREQUEST']._serialized_end=447
+  _globals['_MULTICASTRESPONSE']._serialized_start=449
+  _globals['_MULTICASTRESPONSE']._serialized_end=537
+  _globals['_MULTICASTSERVICE']._serialized_start=539
+  _globals['_MULTICASTSERVICE']._serialized_end=638
 # @@protoc_insertion_point(module_scope)
