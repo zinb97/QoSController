@@ -3,6 +3,7 @@ Mininet Topology Generator - 重构优化版
 功能：双交换机拓扑、环形拓扑、中国电信骨干网拓扑
 优化点：DPID规范、设备名简化、层级仿真控制、命令行参数增强
 """
+import random
 from enum import Enum
 from functools import partial
 from mininet.link import TCLink
@@ -54,6 +55,37 @@ class RingTopo(Topo):
         # 环形连接
         for i in range(n):
             self.addLink(switches[i], switches[(i+1) % n])
+
+
+class McastTestTopo (Topo):
+    def build(self):
+
+
+        layer_node_counts = [2, 3, 3, 6]
+        level = len(layer_node_counts)
+        switches = [[] for _ in range(level)]
+
+        for layer, count in enumerate(layer_node_counts):
+            for idx in range(count):
+                dpid = f'00000000{layer + 1:02x}{idx + 1:02x}0001'
+                sw = self.addSwitch(f'L{layer + 1}s{idx + 1}', dpid=dpid, protocols='OpenFlow13')
+                switches[layer].append(sw)
+
+        for i in range(level - 2):
+            for src in switches[i]:
+                for dst in switches[i + 1]:
+                    self.addLink(src, dst, bw=400, delay=f'{round(random.uniform(0, 20), 2)}ms',
+                                 loss=round(random.uniform(0, 0.1), 3), cls=TCLink)
+
+        for i, sw in enumerate(switches[-2]):
+            self.addLink(sw, switches[-1][2 * i], bw=400, delay=f'{round(random.uniform(0, 20), 2)}ms',
+                         loss=round(random.uniform(0, 0.1), 3), cls=TCLink)
+            self.addLink(sw, switches[-1][2 * i + 1], bw=400, delay=f'{round(random.uniform(0, 20), 2)}ms',
+                         loss=round(random.uniform(0, 0.1), 3), cls=TCLink)
+
+        for i in range(layer_node_counts[-1]):
+            host = self.addHost(f'h{i + 1}', ip=f'10.0.0.{i}/24')
+            self.addLink(host, switches[-1][i])
 
 
 # ==============================================================================
@@ -148,7 +180,8 @@ class ChinaBackboneTopo(Topo):
 topos = {
     'dual': DualSwitchTopo,
     'ring': RingTopo,
-    'chinanet': ChinaBackboneTopo
+    'chinanet': ChinaBackboneTopo,
+    'mcast': McastTestTopo
 }
 
 
@@ -180,7 +213,7 @@ if __name__ == '__main__':
 
     # 命令行参数解析（增强版）
     parser = argparse.ArgumentParser(description='Mininet 拓扑仿真工具')
-    parser.add_argument('-t', '--type', default='net', choices=['dual', 'ring', 'net'], help='拓扑类型')
+    parser.add_argument('-t', '--type', default='net', choices=['dual', 'ring', 'net', 'mcast'], help='拓扑类型')
     parser.add_argument('-l', '--level', type=int, default=3, help='net仿真层级 1~5')
     parser.add_argument('-f', '--full', action='store_true', help='启用全量23省接入节点')
     parser.add_argument('--prov-depth', type=int, default=2, help='省网树状拓扑深度')
