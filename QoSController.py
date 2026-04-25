@@ -61,6 +61,9 @@ class QoSController(app_manager.RyuApp):
         self.host_ip_to_dpid = {}        # 主机IP -> 所在交换机DPID 映射
         self.topology_data = {"switches": [], "links": [], "hosts": []}
 
+        self._topology_stable = False
+        self._start_time = time.time()
+
         # 活跃流表追踪
         # {(src_ip, dst_ip, dscp): {'path': [dpid1, dpid2, ...], 'path_switches': [...]}}
         self.active_flows = {}
@@ -1166,6 +1169,12 @@ class QoSController(app_manager.RyuApp):
 
     # ==================== 拓扑更新 ====================
     def update_topology(self):
+
+        if not self._topology_stable:
+            if time.time() - self._start_time > 5:
+                self.logger.info('Controller Init')
+                self._topology_stable = True
+            return
 
         switch_list = get_switch(self)
         link_list = get_link(self)
