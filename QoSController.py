@@ -181,6 +181,67 @@ class QoSController(app_manager.RyuApp):
             }
             self.logger.info(f"[Route] 流表重新下发完成: {src_ip} -> {dst_ip} {dscp}")
 
+    def _recalculate_affected_multicast_flows(self, deleted_link=None):
+        """重新计算受拓扑变化影响的组播流"""
+        affected_groups = []
+
+        for multicast_addr, flow_info in list(self.multicast_active_flows.items()):
+            path_edges = flow_info.get('path', [])
+            need_recalc = False
+
+            # 检查路径上的链路是否都还在
+            if deleted_link:
+                # 如果指定了删除的链路，检查该链路是否在组播树路径中
+                src_dpid, dst_dpid = deleted_link
+                for (u, v) in path_edges:
+                    if (u == src_dpid and v == dst_dpid) or (u == dst_dpid and v == src_dpid):
+                        need_recalc = True
+                        break
+            else:
+                # 如果没有指定链路，检查所有边是否都在图中
+                for (u, v) in path_edges:
+                    if not self.graph.has_edge(u, v):
+                        need_recalc = True
+                        break
+
+            if need_recalc:
+                affected_groups.append(multicast_addr)
+
+        if affected_groups:
+            self.logger.info(f"[Multicast Route] 需要重新计算的组播流: {len(affected_groups)}")
+
+        # 重新计算每条受影响的组播流
+        for multicast_addr in affected_groups:
+            # 检查源和成员是否还可达
+            if multicast_addr not in self.multicast_sources:
+                self.logger.warning(f"[Multicast Route] 组播组 {multicast_addr} 源 IP 不可达，删除")
+                self._delete_multicast_flows(multicast_addr)
+                if multicast_addr in self.multicast_active_flows:
+                    del self.multicast_active_flows[multicast_addr]
+                continue
+
+            if multicast_addr not in self.multicast_groups or not self.multicast_groups[multicast_addr]:
+                self.logger.warning(f"[Multicast Route] 组播组 {multicast_addr} 无成员，删除")
+                self._delete_multicast_flows(multicast_addr)
+                if multicast_addr in self.multicast_active_flows:
+                    del self.multicast_active_flows[multicast_addr]
+                continue
+
+            # 删除旧流表
+            self._delete_multicast_flows(multicast_addr)
+            self.multicast_flow_installed.discard(multicast_addr)
+
+            # 重新安装流规则
+            success = self._install_multicast_flow_rules(multicast_addr)
+            if success:
+                self.logger.info(f"[Multicast Route] 组播流重新下发完成: {multicast_addr}")
+                # 组播组之间间隔5秒
+                time.sleep(5)
+            else:
+                self.logger.warning(f"[Multicast Route] 组播流重新下发失败: {multicast_addr}")
+                if multicast_addr in self.multicast_active_flows:
+                    del self.multicast_active_flows[multicast_addr]
+
     def _add_path_flow(self, src_ip, dst_ip, dscp, path_switches):
         # 重新路径流表
         priority = 101 if dscp else 10
@@ -331,6 +392,21 @@ class QoSController(app_manager.RyuApp):
             with self._lock:
                 self.datapaths[ev.switch.dp.id] = ev.switch.dp
                 self.update_topology()
+            # 为那些还没有安装组播流规则的组播组安装组播流规则
+            for multicast_addr in list(self.multicast_groups.keys()):
+                # 检查是否已安装过流规则
+                if multicast_addr in self.multicast_flow_installed:
+                    continue
+                # 检查是否有源IP
+                if multicast_addr not in self.multicast_sources:
+                    continue
+                # 检查是否有组成员
+                if not self.multicast_groups[multicast_addr]:
+                    continue
+                # 安装组播流规则
+                self._install_multicast_flow_rules(multicast_addr)
+                # 每个组播组之间间隔 5 秒
+                time.sleep(5)
         except Exception as e:
             self.logger.info(f'Event SwitchEnter {self.sw_name(ev.switch.dp.id)} {e}')
 
@@ -343,6 +419,8 @@ class QoSController(app_manager.RyuApp):
             self.update_topology()
         # 重新计算受影响的流
         self._recalculate_affected_flows()
+        # 重新计算受影响的组播流
+        self._recalculate_affected_multicast_flows()
 
     @set_ev_cls(event.EventLinkAdd)
     def link_add_handler(self, ev):
@@ -352,6 +430,21 @@ class QoSController(app_manager.RyuApp):
             self.update_topology()
         # 检查是否有更优路径可更新
         self._check_update_paths()
+        # 为那些还没有安装组播流规则的组播组安装组播流规则
+        for multicast_addr in list(self.multicast_groups.keys()):
+            # 检查是否已安装过流规则
+            if multicast_addr in self.multicast_flow_installed:
+                continue
+            # 检查是否有源IP
+            if multicast_addr not in self.multicast_sources:
+                continue
+            # 检查是否有组成员
+            if not self.multicast_groups[multicast_addr]:
+                continue
+            # 安装组播流规则
+            self._install_multicast_flow_rules(multicast_addr)
+            # 每个组播组之间间隔 5 秒
+            time.sleep(5)
 
     @set_ev_cls(event.EventLinkDelete)
     def link_delete_handler(self, ev):
@@ -361,6 +454,8 @@ class QoSController(app_manager.RyuApp):
             self.update_topology()
         # 重新计算受影响的流
         self._recalculate_affected_flows()
+        # 重新计算受影响的组播流
+        self._recalculate_affected_multicast_flows(deleted_link=(ev.link.src.dpid, ev.link.dst.dpid))
 
     @set_ev_cls(event.EventHostAdd)
     def host_add_handler(self, ev):
