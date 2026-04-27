@@ -87,6 +87,17 @@ class QoSController(app_manager.RyuApp):
 
         self.switch_name = utils.get_switch_name()
 
+        # 抑制 WSGI HTTP 请求日志
+        # 原始实现使用 LoggingWrapper 写日志到 LOG.info
+        _original_serve_forever = hub.WSGIServer.serve_forever
+        def silent_serve_forever(self):
+            class SilentLoggingWrapper:
+                def write(self, message):
+                    pass  # 完全静默，不输出任何日志
+            self.logger = SilentLoggingWrapper()
+            hub.eventlet.wsgi.server(self.server, self.handle, self.logger)
+        hub.WSGIServer.serve_forever = silent_serve_forever
+
         # 注册 Web API
         wsgi = kwargs['wsgi']
         wsgi.register(TopologyController, {topology_api_name: self})
