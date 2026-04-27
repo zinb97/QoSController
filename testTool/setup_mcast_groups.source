@@ -1,0 +1,27 @@
+h1 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py query 239.1.1.1
+h2 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py query 239.2.2.2
+h3 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py query 239.3.3.3
+h4 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py query 239.4.4.4
+h5 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py query 239.5.5.5
+h6 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py query 239.6.6.6
+
+h1 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.2.2.2
+h1 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.5.5.5
+h1 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.6.6.6
+
+h2 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.1.1.1
+h2 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.3.3.3
+h2 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.6.6.6
+
+h3 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.5.5.5
+h3 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.6.6.6
+
+h4 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.2.2.2
+h4 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.3.3.3
+h4 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.6.6.6
+
+h5 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.1.1.1
+h5 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.4.4.4
+h5 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.6.6.6
+
+h6 python3 /home/hello/jcyz_ceshi/QoSController/testTool/send_igmp.py 239.4.4.4

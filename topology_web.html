@@ -906,7 +906,7 @@
             if (!link.load || !link.bw || link.bw === 0) {
                 return { color: '#58a6ff', highlight: '#79c0ff' }; // 默认蓝色（无数据）
             }
-            const loadMbps = link.load.total_bps;
+            const loadMbps = link.load.tx_bps;
             if (loadMbps < 0.5) {
                 return { color: '#4a5568', highlight: '#718096' }; // 深灰色 - 流量极低
             }

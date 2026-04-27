@@ -874,9 +874,17 @@ class QoSController(app_manager.RyuApp):
                     member_ips.append(member_ip)
 
             # 将 self.graph 转换为邻接矩阵
-            self.adj_matrix_nodes = sorted(self.graph.nodes())
-            # 构建邻接矩阵节点索引和交换机 DPID 之间的的对应关系
-            adj_matrix = nx.to_numpy_array(self.graph, nodelist=self.adj_matrix_nodes, dtype=np.float32)
+            with self._lock:
+                self.adj_matrix_nodes = sorted(self.graph.nodes())
+                # 构建邻接矩阵节点索引和交换机 DPID 之间的的对应关系
+                adj_matrix = nx.to_numpy_array(self.graph, nodelist=self.adj_matrix_nodes, dtype=np.float32)
+                # 获取延迟、带宽、丢包矩阵
+                latency_matrix = nx.attr_matrix(self.graph, edge_attr='delay', rc_order=self.adj_matrix_nodes, dtype=np.float32)
+                bandwidth_matrix = nx.attr_matrix(self.graph, edge_attr='bw', rc_order=self.adj_matrix_nodes,dtype=np.float32)
+                load_matrix = nx.attr_matrix(self.graph, edge_attr='total_bps', rc_order=self.adj_matrix_nodes ,dtype=np.float32)
+                available_bw_matrix = bandwidth_matrix - load_matrix
+                loss_matrix = nx.attr_matrix(self.graph, edge_attr='loss', rc_order=self.adj_matrix_nodes, dtype=np.float32)
+
             src_switch_idx = self.adj_matrix_nodes.index(src_switch_dpid)
             src_switch_id = src_switch_idx + 1
             member_idx_set = [self.adj_matrix_nodes.index(dpid) for dpid in member_dpid_set]
@@ -885,15 +893,6 @@ class QoSController(app_manager.RyuApp):
             self.logger.info(f"[Multicast Route] Source: {src_ip} -> SW:{src_switch_id}")
             self.logger.info(f"[Multicast Route] Member Hosts in Destination Group: {member_ips}")
             self.logger.info(f"[Multicast Route] Member Switches: {member_id_list}")
-
-            net_size = len(self.adj_matrix_nodes)
-
-            # 获取延迟、带宽、丢包矩阵
-            latency_matrix = nx.attr_matrix(self.graph, edge_attr='delay', rc_order=self.adj_matrix_nodes, dtype=np.float32)
-            bandwidth_matrix = nx.attr_matrix(self.graph, edge_attr='bw', rc_order=self.adj_matrix_nodes, dtype=np.float32)
-            load_matrix = nx.attr_matrix(self.graph, edge_attr='total_bps', rc_order=self.adj_matrix_nodes, dtype=np.float32)
-            available_bw_matrix = bandwidth_matrix - load_matrix
-            loss_matrix = nx.attr_matrix(self.graph, edge_attr='loss', rc_order=self.adj_matrix_nodes, dtype=np.float32)
 
             # 调用智能组播路由构建算法构建组播路由, 1-based:source_node,destination_group
             # 获取该组播组的权重配置，默认为 1.0
@@ -913,6 +912,7 @@ class QoSController(app_manager.RyuApp):
                 visited = set()
                 queue = deque([src_idx])
                 visited.add(src_idx)
+                net_size = len(self.adj_matrix_nodes)
 
                 while queue:
                     i = queue.popleft()
