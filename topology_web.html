@@ -1108,14 +1108,13 @@
                     `;
                 } else {
                     flowList.innerHTML = flows.map(f => {
-                        const dscpName = {1: 'Bandwidth', 2: 'Loss', 4: 'Load', 8: 'Delay'}[f.dscp] || 'Default';
                         const pathStr = f.path.join(' → ');
                         return `
                             <div class="switch-item" onclick="highlightFlowPath(${JSON.stringify(f.path_dpids).replace(/"/g, '&quot;')})" style="cursor: pointer;">
                                 <div class="switch-icon" style="background:#238636">→</div>
                                 <div class="switch-info">
                                     <div class="switch-name">${f.src_ip} → ${f.dst_ip}</div>
-                                    <div class="switch-dpid">${dscpName} | ${pathStr}</div>
+                                    <div class="switch-dpid">${pathStr}</div>
                                 </div>
                             </div>
                         `;
