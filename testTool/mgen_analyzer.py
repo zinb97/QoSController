@@ -1,12 +1,17 @@
 import os.path
 import re
-import csv
 from datetime import datetime
 from collections import defaultdict
 
+import matplotlib.pyplot as plt
+
+
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'Arial Unicode MS']
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+
 # ===================== 配置 =====================
 TEST_PATH = '/home/u/test'
-LOG_FILE = "recv.log"
+LOG_FILE = "multi_recv.log"
 OUTPUT_CSV = "mgen_result.csv"
 SUMMARY_FILE = "mgen_summary.txt"
 # =================================================
@@ -96,7 +101,7 @@ def compute_loss(summary):
     loss_rate = (lost / expected) * 100 if expected > 0 else 0.0
     return recv, expected, lost, loss_rate
 
-def write_summary(flow_summary):
+def summary(flow_summary):
     print("=" * 60 + "\n")
     print("            MGEN 测试结果汇总\n")
     print("=" * 60 + "\n\n")
@@ -122,47 +127,93 @@ def write_summary(flow_summary):
         print(f"  最大时延    : {max_d:.2f} ms")
 
 def write_detail_csv(flow_summary, sec_stats):
-    """输出每秒详细CSV"""
-    with open(OUTPUT_CSV, 'w', newline='', encoding='utf-8') as f:
-        w = csv.writer(f)
-        w.writerow([
-            "流ID", "时间(秒)", "带宽(Mbps)", "平均时延(ms)",
-            "最小时延(ms)", "最大时延(ms)", "收包数", "丢包数", "丢包率(%)"
-        ])
+    """绘制每秒详细折线图"""
+    flows = sorted(sec_stats.keys())
+    if not flows:
+        print("[!] 无数据可绘图")
+        return
 
-        for flow in sorted(sec_stats):
-            s_sum = flow_summary[flow]
-            _, expected_total, _, _ = compute_loss(s_sum)
+    # 找所有流中最小的起始时间
+    min_start = min(
+        sorted(sec_stats[flow])[0]
+        for flow in flows
+    )
 
-            for slot in sorted(sec_stats[flow]):
-                st = sec_stats[flow][slot]
-                bytes = st["bytes"]
-                delays = st["delays"]
-                recv = len(delays)
+    # 准备数据
+    time_data = {}      # flow -> [相对时间(秒)]
+    bw_data = {}         # flow -> [带宽(Mbps)]
+    delay_data = {}      # flow -> [平均时延(ms)]
+    loss_data = {}       # flow -> [丢包率(%)]
 
-                # 秒级丢包（近似）
-                expected = expected_total // max(1, len(sec_stats[flow]))
-                lost = max(0, expected - recv)
-                loss_r = (lost/expected)*100 if expected>0 else 0
+    for flow in flows:
+        s_sum = flow_summary[flow]
+        _, expected_total, _, _ = compute_loss(s_sum)
 
-                mbps = (bytes * 8) / 1e6
-                avg_d = sum(delays)/len(delays) if delays else 0
-                min_d = min(delays) if delays else 0
-                max_d = max(delays) if delays else 0
+        times, bws, delays, losses = [], [], [], []
+        for slot in sorted(sec_stats[flow]):
+            st = sec_stats[flow][slot]
+            pkt_bytes = st["bytes"]
+            dlys = st["delays"]
+            recv = len(dlys)
 
-                w.writerow([
-                    flow, slot, round(mbps,3), round(avg_d,2),
-                    round(min_d,2), round(max_d,2), recv, lost, round(loss_r,2)
-                ])
+            expected = expected_total // max(1, len(sec_stats[flow]))
+            lost = max(0, expected - recv)
+            loss_r = (lost / expected) * 100 if expected > 0 else 0
+
+            times.append(slot - min_start)  # 转为相对时间
+            bws.append(pkt_bytes * 8 / 1e6)
+            delays.append(sum(dlys) / len(dlys) if dlys else 0)
+            losses.append(loss_r)
+
+        time_data[flow] = times
+        bw_data[flow] = bws
+        delay_data[flow] = delays
+        loss_data[flow] = losses
+
+    # 创建子图：带宽、时延、丢包率
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+
+    # 带宽子图
+    ax_bw = axes[0]
+    for flow in flows:
+        ax_bw.plot(time_data[flow], bw_data[flow], marker='.', label=f'Flow {flow}', linewidth=1.5)
+    ax_bw.set_ylabel('带宽 (Mbps)')
+    ax_bw.set_title('MGEN 测试 - 带宽/时延/丢包率')
+    ax_bw.legend(loc='upper right')
+    ax_bw.grid(True, alpha=0.3)
+
+    # 时延子图
+    ax_delay = axes[1]
+    for flow in flows:
+        ax_delay.plot(time_data[flow], delay_data[flow], marker='.', label=f'Flow {flow}', linewidth=1.5)
+    ax_delay.set_ylabel('时延 (ms)')
+    ax_delay.legend(loc='upper right')
+    ax_delay.grid(True, alpha=0.3)
+
+    # 丢包率子图
+    ax_loss = axes[2]
+    for flow in flows:
+        ax_loss.plot(time_data[flow], loss_data[flow], marker='.', label=f'Flow {flow}', linewidth=1.5)
+    ax_loss.set_ylabel('丢包率 (%)')
+    ax_loss.set_xlabel('时间 (秒)')
+    ax_loss.legend(loc='upper right')
+    ax_loss.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    # output_png = OUTPUT_CSV.replace('.csv', '.png')
+    # plt.savefig(output_png, dpi=150)
+    # print(f"[+] 图表已保存: {output_png}")
+    # plt.close()
 
 def main():
     print("[+] 解析日志...")
     flow_summary, sec_stats = parse_mgen_log(os.path.join(TEST_PATH, LOG_FILE))
     print("[+] 生成汇总报告...")
-    write_summary(flow_summary)
-    print("[+] 生成每秒CSV...")
+    summary(flow_summary)
+    print("[+] 生成每秒图表...")
     write_detail_csv(flow_summary, sec_stats)
-    print("[✔] 完成！文件：mgen_result.csv + mgen_summary.txt")
+    print("[✔] 完成！文件：mgen_result.png + mgen_summary.txt")
 
 if __name__ == "__main__":
     main()
+    plt.show()
