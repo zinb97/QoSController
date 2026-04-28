@@ -1,24 +1,22 @@
-import traceback
+import json
+import os
+import threading
+import time
+from collections import deque
 from typing import List
 
+import networkx as nx
+import numpy as np
+from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-from ryu.controller.ofp_event import EventOFPFlowRemoved
 from ryu.controller.handler import set_ev_cls, MAIN_DISPATCHER, CONFIG_DISPATCHER
+from ryu.controller.ofp_event import EventOFPFlowRemoved
+from ryu.lib import hub
+from ryu.lib.packet import packet, ethernet, arp, ipv4, icmp, tcp, udp, igmp
 from ryu.ofproto import ofproto_v1_3, ether
 from ryu.topology import event
 from ryu.topology.api import get_switch, get_link, get_host
-from ryu.app.wsgi import ControllerBase, WSGIApplication, route
-from ryu.lib import hub
-from ryu.lib.packet import packet, ethernet, arp, ipv4, icmp, tcp, udp, ipv6, igmp
-from collections import deque
-import threading
-
-import json
-import os
-import time
-import numpy as np
-import networkx as nx
 from webob import Response
 
 import utils
@@ -42,6 +40,7 @@ class QoSController(app_manager.RyuApp):
         self.ip_to_mac = {}             # ip -> mac
         self.inter_switch_ports = {}    # {dpid: set(port_no, ...)}
         self.datapaths = {}             # 保存所有交换机
+
         # 组播组管理: {组播组地址: {dpid: {MAC地址: (src_ip, in_port)}}}
         self.multicast_groups = {}
         # 组播流规则记录: {组播组地址: [(dpid, match_description), ...]}
@@ -184,8 +183,7 @@ class QoSController(app_manager.RyuApp):
             self.logger.info(f"[Route] 重新计算路径: {' -> '.join(self.switch_name.get(f'{p:016x}', f'{p}') for p in new_path)}")
 
             # 重新构建 path_switches
-            path_switches = self.get_path_switches(new_path, src_host['dpid'], src_host['port'],
-                                                   dst_host['dpid'], dst_host['port'])
+            path_switches = self.get_path_switches(new_path, src_host['dpid'], src_host['port'], dst_host['dpid'], dst_host['port'])
             self._add_path_flow(src_ip, dst_ip, path_switches)
             # 更新活跃流信息
             self.active_flows[(src_ip, dst_ip)] = {
@@ -571,6 +569,29 @@ class QoSController(app_manager.RyuApp):
         })
         return path_switches
 
+    # ==================== 交换机连接初始化 ====================
+    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
+    def _switch_features_handler(self, ev):
+        datapath = ev.msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        # 清空旧流表
+        mod = parser.OFPFlowMod(datapath=datapath, command=ofproto.OFPFC_DELETE,
+                                out_port=ofproto.OFPP_ANY, out_group=ofproto.OFPG_ANY)
+        datapath.send_msg(mod)
+        self.logger.info(f"[Switch Init] Init flows on Switch {self.sw_name(datapath.id)}")
+
+        # 表项0：默认上送控制器
+        match = parser.OFPMatch()
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
+        self.add_flow(datapath, 0, match, actions, idle_timeout=0)
+
+        # 表项：默认丢弃所有 UDP 组播报文（优先级低于具体组播组规则）
+        match = parser.OFPMatch(eth_type=0x0800, ip_proto=17, ipv4_dst=("224.0.0.0", "240.0.0.0"))
+        actions = []  # 空动作 = 丢弃
+        self.add_flow(datapath, 1, match, actions, idle_timeout=0)
+
     # ==================== 拓扑事件回调 ====================
     @set_ev_cls(event.EventSwitchEnter)
     def switch_enter_handler(self, ev):
@@ -592,8 +613,6 @@ class QoSController(app_manager.RyuApp):
                     continue
                 # 安装组播流规则
                 self._install_multicast_flow_rules(multicast_addr)
-                # 每个组播组之间间隔 5 秒
-                # time.sleep(5)
         except Exception as e:
             self.logger.info(f'Event SwitchEnter {self.sw_name(ev.switch.dp.id)} {e}')
 
@@ -619,19 +638,13 @@ class QoSController(app_manager.RyuApp):
         self._check_update_paths()
         # 为那些还没有安装组播流规则的组播组安装组播流规则
         for multicast_addr in list(self.multicast_groups.keys()):
-            # 检查是否已安装过流规则
             if multicast_addr in self.multicast_flow_installed:
                 continue
-            # 检查是否有源IP
             if multicast_addr not in self.multicast_sources:
                 continue
-            # 检查是否有组成员
             if not self.multicast_groups[multicast_addr]:
                 continue
-            # 安装组播流规则
             self._install_multicast_flow_rules(multicast_addr)
-            # 每个组播组之间间隔 5 秒
-            # time.sleep(5)
 
     @set_ev_cls(event.EventLinkDelete)
     def link_delete_handler(self, ev):
@@ -656,12 +669,10 @@ class QoSController(app_manager.RyuApp):
         dpid = msg.datapath.id
         now = time.time()
 
-        # 保存当前统计
         self.port_stats[dpid] = {}
 
         for stat in msg.body:
             port_no = stat.port_no
-            # 跳过特殊端口
             if port_no > ofproto_v1_3.OFPP_MAX:
                 continue
 
@@ -682,40 +693,13 @@ class QoSController(app_manager.RyuApp):
                 if time_delta > 0:
                     rx_bytes_delta = stat.rx_bytes - prev['rx_bytes']
                     tx_bytes_delta = stat.tx_bytes - prev['tx_bytes']
-
-                    # 计算负载 (Mbps)
                     rx_bps = (rx_bytes_delta * 8) / time_delta / 1_000_000
                     tx_bps = (tx_bytes_delta * 8) / time_delta / 1_000_000
-
                     self.port_stats[dpid][port_no]['rx_bps'] = round(rx_bps, 2)
                     self.port_stats[dpid][port_no]['tx_bps'] = round(tx_bps, 2)
                     self.port_stats[dpid][port_no]['total_bps'] = round(rx_bps + tx_bps, 2)
 
-        # 保存本次统计作为下一次的前一个
         self.port_stats_prev[dpid] = self.port_stats[dpid]
-
-    # ==================== 交换机连接初始化 ====================
-    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
-    def _switch_features_handler(self, ev):
-        datapath = ev.msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-
-        # 清空旧流表
-        mod = parser.OFPFlowMod(datapath=datapath, command=ofproto.OFPFC_DELETE,
-                                out_port=ofproto.OFPP_ANY, out_group=ofproto.OFPG_ANY)
-        datapath.send_msg(mod)
-        self.logger.info(f"[Switch Init] Init flows on Switch {self.sw_name(datapath.id)}")
-
-        # 表项0：默认上送控制器
-        match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
-        self.add_flow(datapath, 0, match, actions, idle_timeout=0)
-
-        # 表项：默认丢弃所有 UDP 组播报文（优先级低于具体组播组规则）
-        match = parser.OFPMatch(eth_type=0x0800, ip_proto=17, ipv4_dst=("224.0.0.0", "240.0.0.0"))
-        actions = []  # 空动作 = 丢弃
-        self.add_flow(datapath, 1, match, actions, idle_timeout=0)
 
     # ==================== 核心：PacketIn 处理 ====================
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -764,7 +748,6 @@ class QoSController(app_manager.RyuApp):
             dpid = datapath.id
 
             match = msg.match
-            # 从 match 中提取流信息
             ipv4_src = match.get('ipv4_src')
             ipv4_dst = match.get('ipv4_dst')
             if not ipv4_src or not ipv4_dst:
@@ -950,14 +933,11 @@ class QoSController(app_manager.RyuApp):
         self.logger.info(f"[IGMP] SW:{dpid} IGMP {type_name} from {src_ip} for group {multicast_addr}")
 
         if msgtype in [0x11]:
-            # 将源 IP 地址作为该组播组的源节点记录
             self.logger.info(f"[IGMP Query] Source IP: {src_ip}, Multicast Group: {multicast_addr}")
             if multicast_addr == '224.0.0.0':
-                # 224.0.0.0 代表删除源IP的信号，用 src_ip 查找并删除对应关系
                 groups_to_delete = [g for g, s in self.multicast_sources.items() if s == src_ip]
                 for g in groups_to_delete:
                     del self.multicast_sources[g]
-                    # 删除该组播组的所有流规则
                     if g in self.multicast_flow_installed:
                         self._delete_multicast_flows(g)
                         self.multicast_flow_installed.discard(g)
@@ -966,14 +946,11 @@ class QoSController(app_manager.RyuApp):
                     self.logger.info(f"[IGMP Query] Received 224.0.0.0, but no group found with source {src_ip}")
             elif multicast_addr != '0.0.0.0':  # Specific Query
                 if multicast_addr not in self.multicast_sources:
-                    # 组播组还没有源IP，将当前源 ip 和该组播组进行关联。如果组播组中还有组播成员，则安装组播流规则
                     self.multicast_sources[multicast_addr] = src_ip
                     self.logger.info(f"[IGMP Query] Recorded source node {src_ip} for multicast group {multicast_addr}")
-                    # 如果组播组已有成员，安装流规则
                     if multicast_addr in self.multicast_groups and self.multicast_groups[multicast_addr]:
                         self._install_multicast_flow_rules(multicast_addr)
                 else:
-                    # 组播组已有源IP，不允许更改
                     self.logger.info(f"[IGMP Query] Source node for {multicast_addr} already recorded as {self.multicast_sources[multicast_addr]}, skipping")
             return
 
@@ -1003,218 +980,18 @@ class QoSController(app_manager.RyuApp):
         # msgtype 0x12/0x16 = Join (加入组播组)
         if msgtype in [0x12, 0x16]:
             self.add_member_to_group(dpid, src_mac, src_ip, multicast_addr, in_port)
-            # 当组播组有对应的源IP时，安装组播流规则
             if multicast_addr in self.multicast_sources:
                 self._install_multicast_flow_rules(multicast_addr)
         # msgtype 0x17 = Leave (离开组播组)
         elif msgtype == 0x17:
             self.remove_member_from_group(dpid, src_mac, multicast_addr)
 
-    def _install_multicast_flow_rules(self, multicast_addr):
-        """
-        为指定组播组安装组播流规则
-        根据 multicast_sources 获取源 IP，根据 multicast_groups 获取组成员信息
-        """
-        # 检查该组播组是否有源IP和成员
-        if multicast_addr not in self.multicast_sources:
-            self.logger.info(f"[Multicast Flow] Group {multicast_addr} has no source IP, skipping flow installation")
-            return False
-
-        if multicast_addr not in self.multicast_groups or not self.multicast_groups[multicast_addr]:
-            self.logger.info(f"[Multicast Flow] Group {multicast_addr} has no members, skipping flow installation")
-            return False
-
-        self.logger.info(f"[Multicast Flow] multicast_weights content: {self.multicast_weights}")
-
-        src_ip = self.multicast_sources[multicast_addr]
-        src_switch_dpid = self.host_ip_to_dpid.get(src_ip)
-        if not src_switch_dpid:
-            self.logger.warning(f"[Multicast Route] Cannot find source switch for IP: {src_ip}")
-            return False
-
-        try:
-            # 标记该组播组已安装流规则
-            self.multicast_flow_installed.add(multicast_addr)
-
-            # 收集所有成员信息（去重）
-            member_ips = []
-            member_dpid_set = set()
-            for group_dpid, mac_dict in self.multicast_groups[multicast_addr].items():
-                member_dpid_set.add(group_dpid)
-                for mac, (member_ip, member_port) in mac_dict.items():
-                    member_ips.append(member_ip)
-
-            # 将 self.graph 转换为邻接矩阵
-            with self._lock:
-                self.adj_matrix_nodes = sorted(self.graph.nodes())
-                # 构建邻接矩阵节点索引和交换机 DPID 之间的的对应关系
-                adj_matrix = nx.to_numpy_array(self.graph, nodelist=self.adj_matrix_nodes, dtype=np.float32)
-                # 获取延迟、带宽、丢包矩阵
-                latency_matrix = nx.attr_matrix(self.graph, edge_attr='delay', rc_order=self.adj_matrix_nodes, dtype=np.float32)
-                bandwidth_matrix = nx.attr_matrix(self.graph, edge_attr='bw', rc_order=self.adj_matrix_nodes,dtype=np.float32)
-                load_matrix = nx.attr_matrix(self.graph, edge_attr='total_bps', rc_order=self.adj_matrix_nodes ,dtype=np.float32)
-                available_bw_matrix = bandwidth_matrix - load_matrix
-                loss_matrix = nx.attr_matrix(self.graph, edge_attr='loss', rc_order=self.adj_matrix_nodes, dtype=np.float32)
-
-            src_switch_idx = self.adj_matrix_nodes.index(src_switch_dpid)
-            src_switch_id = src_switch_idx + 1
-            member_idx_set = [self.adj_matrix_nodes.index(dpid) for dpid in member_dpid_set]
-            member_id_list = [idx + 1 for idx in member_idx_set]
-
-            self.logger.info(f"[Multicast Route] Source: {src_ip} -> SW:{src_switch_id}")
-            self.logger.info(f"[Multicast Route] Member Hosts in Destination Group: {member_ips}")
-            self.logger.info(f"[Multicast Route] Member Switches: {member_id_list}")
-
-            # 调用智能组播路由构建算法构建组播路由, 1-based:source_node,destination_group
-            # 获取该组播组的权重配置，默认为 1.0
-            weights = self.multicast_weights.get(multicast_addr,
-                                                 {'latency': 1.0, 'bandwidth': 1.0, 'loss': 1.0})
-            self.logger.info(f"[Multicast Route] Using weights for {multicast_addr}: latency={weights['latency']}, bandwidth={weights['bandwidth']}, loss={weights['loss']}")
-            is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, available_bw_matrix, loss_matrix,
-                                                         source_node=src_switch_id,
-                                                         destination_group=member_id_list,
-                                                         latency_weight=weights['latency'],
-                                                         bandwidth_weight=weights['bandwidth'],
-                                                         loss_weight=weights['loss'],
-                                                         algorithm_type=self.routing_algorithm)
-            if is_success:
-                # 将邻接矩阵的双向性变成从源到目的集合的单向性矩阵（BFS）
-                src_idx = self.adj_matrix_nodes.index(src_switch_dpid)
-                visited = set()
-                queue = deque([src_idx])
-                visited.add(src_idx)
-                net_size = len(self.adj_matrix_nodes)
-
-                while queue:
-                    i = queue.popleft()
-                    for j in range(net_size):
-                        if route_matrix[i, j] == 1:
-                            route_matrix[j, i] = 0  # 删除反向边，确保单向性
-                            if j not in visited:
-                                queue.append(j)
-                                visited.add(j)
-
-                # 根据单向性矩阵安装组播流规则
-                installed_flows = []
-                for i in range(net_size):
-                    src_node_dpid = self.adj_matrix_nodes[i]
-                    if src_node_dpid not in self.datapaths:
-                        continue
-
-                    src_datapath = self.datapaths[src_node_dpid]
-                    src_parser = src_datapath.ofproto_parser
-
-                    # 收集该节点需要转发到的所有下一跳
-                    out_actions = []
-
-                    # 如果该交换机上有组成员主机，转发到主机端口（目的交换机）
-                    if src_node_dpid in member_dpid_set:
-                        for mac, (member_ip, member_port) in self.multicast_groups[multicast_addr].get(src_node_dpid, {}).items():
-                            out_actions.append(src_parser.OFPActionOutput(member_port))
-                            self.logger.info(f"[Multicast Flow] SW:{self.sw_name(src_node_dpid)} -> host port {member_port}")
-
-                    # 遍历 route_matrix[i][j] == 1，转发到下一跳交换机（源/中间交换机）
-                    for j in range(net_size):
-                        if route_matrix[i][j] == 1:
-                            dst_node_dpid = self.adj_matrix_nodes[j]
-                            out_port = self.get_path_out_port(src_node_dpid, dst_node_dpid)
-                            if out_port:
-                                out_actions.append(src_parser.OFPActionOutput(out_port))
-                                self.logger.info(f"[Multicast Flow] SW:{self.sw_name(src_node_dpid)} -> port {out_port} (next hop SW:{self.sw_name(dst_node_dpid)})")
-
-                    if out_actions:
-                        # 源交换机需要匹配 in_port + src_ip + 组播地址，其他交换机只匹配 src_ip + 组播地址
-                        if src_node_dpid == src_switch_dpid:
-                            # 源交换机需要知道入端口，这里用 OFPP_LOCAL 暂时处理
-                            match = src_parser.OFPMatch(
-                                eth_type=0x0800,
-                                ipv4_src=src_ip,
-                                ipv4_dst=multicast_addr
-                            )
-                        else:
-                            match = src_parser.OFPMatch(
-                                eth_type=0x0800,
-                                ipv4_src=src_ip,
-                                ipv4_dst=multicast_addr
-                            )
-                        self.add_flow(src_datapath, 100, match, out_actions, idle_timeout=0, hard_timeout=0)
-                        installed_flows.append((src_node_dpid, f"ipv4_src={src_ip}, ipv4_dst={multicast_addr} -> {len(out_actions)} port(s)"))
-
-                # 记录已安装的流规则
-                if multicast_addr not in self.multicast_flows:
-                    self.multicast_flows[multicast_addr] = []
-                self.multicast_flows[multicast_addr].extend(installed_flows)
-                self.logger.info(f"[Multicast Flow] Group {multicast_addr} installed {len(installed_flows)} flow rules")
-
-                # 提取组播树路径列表
-                path_list = []
-                for i in range(net_size):
-                    for j in range(net_size):
-                        if route_matrix[i, j] == 1:
-                            path_list.append((self.adj_matrix_nodes[i], self.adj_matrix_nodes[j]))
-
-                # 更新组播活跃流信息
-                self.multicast_active_flows[multicast_addr] = {
-                    'source_ip': src_ip,
-                    'source_dpid': src_switch_dpid,
-                    'route_matrix': route_matrix,
-                    'member_ips': member_ips,
-                    'path': path_list,
-                    'installed_time': time.time()
-                }
-                self.logger.info(f"[Multicast Active Flow] Recorded active flow for group {multicast_addr}")
-
-                return True
-
-            else:
-                # 组播组流规则安装失败，删除标记
-                self.multicast_flow_installed.discard(multicast_addr)
-                self.logger.info(f"[Multicast Route] Route Matrix: failed")
-                return False
-
-        except Exception as e:
-            # 组播组流规则安装出现异常，删除标记
-            self.multicast_flow_installed.discard(multicast_addr)
-            self.logger.error(f"[Multicast Route] Exception: {e}")
-            return False
-
-    def _delete_multicast_flows(self, multicast_addr):
-        """
-        删除指定组播组的所有流表规则
-        """
-        if multicast_addr not in self.multicast_flows or not self.multicast_flows[multicast_addr]:
-            return
-
-        for dpid, match_desc in self.multicast_flows[multicast_addr]:
-            if dpid not in self.datapaths:
-                continue
-            datapath = self.datapaths[dpid]
-            ofproto = datapath.ofproto
-            parser = datapath.ofproto_parser
-
-            # 构造匹配 ipv4_dst 的 match
-            match = parser.OFPMatch(eth_type=0x0800, ipv4_dst=multicast_addr)
-            # 删除该组播组的流表
-            mod = parser.OFPFlowMod(
-                datapath=datapath,
-                command=ofproto.OFPFC_DELETE,
-                out_port=ofproto.OFPP_ANY,
-                out_group=ofproto.OFPG_ANY,
-                match=match
-            )
-            datapath.send_msg(mod)
-            self.logger.info(f"[Multicast Flow] Deleted flow on SW:{dpid} for group {multicast_addr}")
-
-        # 清空该组播组的流表记录
-        self.multicast_flows[multicast_addr] = []
-        self.multicast_flow_installed.discard(multicast_addr)
-
-        # 从组播活跃流中移除
-        if multicast_addr in self.multicast_active_flows:
-            del self.multicast_active_flows[multicast_addr]
-            self.logger.info(f"[Multicast Active Flow] Removed active flow for group {multicast_addr}")
-
     # ==================== 组播组管理 ====================
+    def _is_multicast_ip(self, ip):
+        """检查是否为组播 IP 地址 (224.0.0.0 - 239.255.255.255)"""
+        ip_parts = [int(x) for x in ip.split('.')]
+        return ip_parts[0] >= 224 and ip_parts[0] <= 239
+
     def add_member_to_group(self, dpid, mac, src_ip, multicast_addr, in_port):
         """
         将主机加入组播组
@@ -1239,18 +1016,13 @@ class QoSController(app_manager.RyuApp):
                     del self.multicast_groups[multicast_addr][dpid][mac]
                     self.logger.info(f"[Multicast Group] Host left: Group={multicast_addr}, MAC={mac}")
 
-                    # 如果该组播组在该交换机上没有成员了，删除该交换机的记录
                     if not self.multicast_groups[multicast_addr][dpid]:
                         del self.multicast_groups[multicast_addr][dpid]
 
-                    # 如果该组播组没有组播成员了
                     if not self.multicast_groups[multicast_addr]:
-                        # 且该组播组没有对应的源IP，则删除该组播组
-                        # 否则不做操作，保留该组播组（后续有新成员加入时可复用源IP）
                         if multicast_addr not in self.multicast_sources:
                             del self.multicast_groups[multicast_addr]
                     else:
-                        # 如果该组播组删除主机后还有组播成员，且有源IP，则重新安装流规则
                         if multicast_addr in self.multicast_sources:
                             self._install_multicast_flow_rules(multicast_addr)
                 else:
@@ -1276,12 +1048,181 @@ class QoSController(app_manager.RyuApp):
                     self.logger.info(f"      MAC={mac}, IP={src_ip}, Port={port}")
         self.logger.info("=========================================")
 
-    def _is_multicast_ip(self, ip):
-        """检查是否为组播 IP 地址 (224.0.0.0 - 239.255.255.255)"""
-        ip_parts = [int(x) for x in ip.split('.')]
-        return ip_parts[0] >= 224 and ip_parts[0] <= 239
+    # ==================== 组播流规则安装/删除 ====================
+    def _install_multicast_flow_rules(self, multicast_addr):
+        """
+        为指定组播组安装组播流规则
+        根据 multicast_sources 获取源 IP，根据 multicast_groups 获取组成员信息
+        """
+        if multicast_addr not in self.multicast_sources:
+            self.logger.info(f"[Multicast Flow] Group {multicast_addr} has no source IP, skipping flow installation")
+            return False
 
-    # ==================== 【新增】通用主机学习函数 ====================
+        if multicast_addr not in self.multicast_groups or not self.multicast_groups[multicast_addr]:
+            self.logger.info(f"[Multicast Flow] Group {multicast_addr} has no members, skipping flow installation")
+            return False
+
+        self.logger.info(f"[Multicast Flow] multicast_weights content: {self.multicast_weights}")
+
+        src_ip = self.multicast_sources[multicast_addr]
+        src_switch_dpid = self.host_ip_to_dpid.get(src_ip)
+        if not src_switch_dpid:
+            self.logger.warning(f"[Multicast Route] Cannot find source switch for IP: {src_ip}")
+            return False
+
+        try:
+            self.multicast_flow_installed.add(multicast_addr)
+
+            member_ips = []
+            member_dpid_set = set()
+            for group_dpid, mac_dict in self.multicast_groups[multicast_addr].items():
+                member_dpid_set.add(group_dpid)
+                for mac, (member_ip, member_port) in mac_dict.items():
+                    member_ips.append(member_ip)
+
+            with self._lock:
+                self.adj_matrix_nodes = sorted(self.graph.nodes())
+                adj_matrix = nx.to_numpy_array(self.graph, nodelist=self.adj_matrix_nodes, dtype=np.float32)
+                latency_matrix = nx.attr_matrix(self.graph, edge_attr='delay', rc_order=self.adj_matrix_nodes, dtype=np.float32)
+                bandwidth_matrix = nx.attr_matrix(self.graph, edge_attr='bw', rc_order=self.adj_matrix_nodes, dtype=np.float32)
+                load_matrix = nx.attr_matrix(self.graph, edge_attr='total_bps', rc_order=self.adj_matrix_nodes, dtype=np.float32)
+                available_bw_matrix = bandwidth_matrix - load_matrix
+                loss_matrix = nx.attr_matrix(self.graph, edge_attr='loss', rc_order=self.adj_matrix_nodes, dtype=np.float32)
+
+            src_switch_idx = self.adj_matrix_nodes.index(src_switch_dpid)
+            src_switch_id = src_switch_idx + 1
+            member_idx_set = [self.adj_matrix_nodes.index(dpid) for dpid in member_dpid_set]
+            member_id_list = [idx + 1 for idx in member_idx_set]
+
+            self.logger.info(f"[Multicast Route] Source: {src_ip} -> SW:{src_switch_id}")
+            self.logger.info(f"[Multicast Route] Member Hosts in Destination Group: {member_ips}")
+            self.logger.info(f"[Multicast Route] Member Switches: {member_id_list}")
+
+            weights = self.multicast_weights.get(multicast_addr,
+                                                 {'latency': 1.0, 'bandwidth': 1.0, 'loss': 1.0})
+            self.logger.info(f"[Multicast Route] Using weights for {multicast_addr}: latency={weights['latency']}, bandwidth={weights['bandwidth']}, loss={weights['loss']}")
+            is_success, route_matrix = RL_multicast_tree(adj_matrix, latency_matrix, available_bw_matrix, loss_matrix,
+                                                         source_node=src_switch_id,
+                                                         destination_group=member_id_list,
+                                                         latency_weight=weights['latency'],
+                                                         bandwidth_weight=weights['bandwidth'],
+                                                         loss_weight=weights['loss'],
+                                                         algorithm_type=self.routing_algorithm)
+            if is_success:
+                src_idx = self.adj_matrix_nodes.index(src_switch_dpid)
+                visited = set()
+                queue = deque([src_idx])
+                visited.add(src_idx)
+                net_size = len(self.adj_matrix_nodes)
+
+                while queue:
+                    i = queue.popleft()
+                    for j in range(net_size):
+                        if route_matrix[i, j] == 1:
+                            route_matrix[j, i] = 0
+                            if j not in visited:
+                                queue.append(j)
+                                visited.add(j)
+
+                installed_flows = []
+                for i in range(net_size):
+                    src_node_dpid = self.adj_matrix_nodes[i]
+                    if src_node_dpid not in self.datapaths:
+                        continue
+
+                    src_datapath = self.datapaths[src_node_dpid]
+                    src_parser = src_datapath.ofproto_parser
+
+                    out_actions = []
+
+                    if src_node_dpid in member_dpid_set:
+                        for mac, (member_ip, member_port) in self.multicast_groups[multicast_addr].get(src_node_dpid, {}).items():
+                            out_actions.append(src_parser.OFPActionOutput(member_port))
+                            self.logger.info(f"[Multicast Flow] SW:{self.sw_name(src_node_dpid)} -> host port {member_port}")
+
+                    for j in range(net_size):
+                        if route_matrix[i][j] == 1:
+                            dst_node_dpid = self.adj_matrix_nodes[j]
+                            out_port = self.get_path_out_port(src_node_dpid, dst_node_dpid)
+                            if out_port:
+                                out_actions.append(src_parser.OFPActionOutput(out_port))
+                                self.logger.info(f"[Multicast Flow] SW:{self.sw_name(src_node_dpid)} -> port {out_port} (next hop SW:{self.sw_name(dst_node_dpid)})")
+
+                    if out_actions:
+                        match = src_parser.OFPMatch(
+                            eth_type=0x0800,
+                            ipv4_src=src_ip,
+                            ipv4_dst=multicast_addr
+                        )
+                        self.add_flow(src_datapath, 100, match, out_actions, idle_timeout=0, hard_timeout=0)
+                        installed_flows.append((src_node_dpid, f"ipv4_src={src_ip}, ipv4_dst={multicast_addr} -> {len(out_actions)} port(s)"))
+
+                if multicast_addr not in self.multicast_flows:
+                    self.multicast_flows[multicast_addr] = []
+                self.multicast_flows[multicast_addr].extend(installed_flows)
+                self.logger.info(f"[Multicast Flow] Group {multicast_addr} installed {len(installed_flows)} flow rules")
+
+                path_list = []
+                for i in range(net_size):
+                    for j in range(net_size):
+                        if route_matrix[i, j] == 1:
+                            path_list.append((self.adj_matrix_nodes[i], self.adj_matrix_nodes[j]))
+
+                self.multicast_active_flows[multicast_addr] = {
+                    'source_ip': src_ip,
+                    'source_dpid': src_switch_dpid,
+                    'route_matrix': route_matrix,
+                    'member_ips': member_ips,
+                    'path': path_list,
+                    'installed_time': time.time()
+                }
+                self.logger.info(f"[Multicast Active Flow] Recorded active flow for group {multicast_addr}")
+
+                return True
+
+            else:
+                self.multicast_flow_installed.discard(multicast_addr)
+                self.logger.info(f"[Multicast Route] Route Matrix: failed")
+                return False
+
+        except Exception as e:
+            self.multicast_flow_installed.discard(multicast_addr)
+            self.logger.error(f"[Multicast Route] Exception: {e}")
+            return False
+
+    def _delete_multicast_flows(self, multicast_addr):
+        """
+        删除指定组播组的所有流表规则
+        """
+        if multicast_addr not in self.multicast_flows or not self.multicast_flows[multicast_addr]:
+            return
+
+        for dpid, match_desc in self.multicast_flows[multicast_addr]:
+            if dpid not in self.datapaths:
+                continue
+            datapath = self.datapaths[dpid]
+            ofproto = datapath.ofproto
+            parser = datapath.ofproto_parser
+
+            match = parser.OFPMatch(eth_type=0x0800, ipv4_dst=multicast_addr)
+            mod = parser.OFPFlowMod(
+                datapath=datapath,
+                command=ofproto.OFPFC_DELETE,
+                out_port=ofproto.OFPP_ANY,
+                out_group=ofproto.OFPG_ANY,
+                match=match
+            )
+            datapath.send_msg(mod)
+            self.logger.info(f"[Multicast Flow] Deleted flow on SW:{dpid} for group {multicast_addr}")
+
+        self.multicast_flows[multicast_addr] = []
+        self.multicast_flow_installed.discard(multicast_addr)
+
+        if multicast_addr in self.multicast_active_flows:
+            del self.multicast_active_flows[multicast_addr]
+            self.logger.info(f"[Multicast Active Flow] Removed active flow for group {multicast_addr}")
+
+    # ==================== 主机学习 ====================
     def _learn_host(self, dpid, in_port, src_eth, src_ip, proto_tag=""):
         """
         通用主机学习核心逻辑
@@ -1306,25 +1247,23 @@ class QoSController(app_manager.RyuApp):
             }
             self.logger.info(f"[Host Learn {proto_tag}] MAC:{src_eth} IP:{src_ip} at Switch {dpid} Port {in_port}")
         else:
-            # 更新位置或IP
             old = self.hosts[src_eth]
             if old['dpid'] != dpid or old['port'] != in_port:
                 self.hosts[src_eth]['dpid'] = dpid
                 self.hosts[src_eth]['port'] = in_port
                 self.logger.info(f"[Host Move {proto_tag}] MAC:{src_eth} at Switch {dpid} Port {in_port}")
-            # 更新IP（如果之前没有）
             if src_ip and not self.hosts[src_eth]['ip']:
                 self.hosts[src_eth]['ip'] = src_ip
 
         # 维护 IP → MAC 映射
         if src_ip:
-            # 如果该 IP 之前属于别人，先删掉旧的记录（防止 IP 冲突漂移）
             if src_ip in self.ip_to_mac and self.ip_to_mac[src_ip] != src_eth:
                 old_mac = self.ip_to_mac[src_ip]
                 del self.hosts[old_mac]
                 self.logger.warning(f"[IP Conflict] IP {src_ip} moved from {old_mac} to {src_eth}")
             self.ip_to_mac[src_ip] = src_eth
 
+    # ==================== 数据包发送 ====================
     def send_arp_reply(self, datapath, eth_pkt, src_mac, src_ip, dst_mac, dst_ip, in_port):
         pkt = packet.Packet()
         pkt.add_protocol(ethernet.ethernet(ethertype=eth_pkt.ethertype, src=dst_mac, dst=src_mac))
@@ -1346,20 +1285,13 @@ class QoSController(app_manager.RyuApp):
     def send_arp_request_for_ip(self, datapath, src_mac, src_ip, target_ip):
         """
         模拟源主机构造并发送 ARP Request，查询目标 IP 的 MAC
-        :param datapath: 收到 IPv4 报文的交换机（用于获取 ofproto/parser）
-        :param src_mac: 源主机 MAC
-        :param src_ip: 源主机 IP
-        :param target_ip: 需要查询的目标 IP
         """
-        # 构造 ARP 请求报文
         pkt = packet.Packet()
-        # 1. 以太网头：广播地址
         pkt.add_protocol(ethernet.ethernet(
             ethertype=ether.ETH_TYPE_ARP,
             src=src_mac,
             dst='ff:ff:ff:ff:ff:ff'
         ))
-        # 2. ARP 头：Request 类型
         pkt.add_protocol(arp.arp(
             opcode=arp.ARP_REQUEST,
             src_mac=src_mac,
@@ -1368,7 +1300,6 @@ class QoSController(app_manager.RyuApp):
             dst_ip=target_ip
         ))
         pkt.serialize()
-        # 调用通用泛洪函数发送
         self.flood_packet_to_all_host_ports(pkt.data)
 
     # ==================== ARP 全网泛洪 ====================
@@ -1387,7 +1318,6 @@ class QoSController(app_manager.RyuApp):
             inter_ports = self.inter_switch_ports.get(dpid, set())
             flood_ports = []
 
-            # 从 graph 获取交换机端口信息
             if dpid in self.graph:
                 sw_ports = self.graph.nodes[dpid].get('ports', [])
                 flood_ports = [p for p in sw_ports if p not in inter_ports]
@@ -1405,21 +1335,16 @@ class QoSController(app_manager.RyuApp):
     def flood_arp_for_ip(self, target_ip):
         """
         构造针对目标IP的ARP请求并全网泛洪
-        :param target_ip: 需要查询MAC的目标IP地址
         """
-        # 控制器虚拟MAC和IP（用于发送ARP请求，可根据实际网络调整）
         controller_mac = '00:00:00:00:00:cc'
         controller_ip = '10.0.0.254'
 
-        # 构造ARP请求报文
         pkt = packet.Packet()
-        # 以太网层：广播目的MAC
         pkt.add_protocol(ethernet.ethernet(
             ethertype=ether.ETH_TYPE_ARP,
             src=controller_mac,
             dst='ff:ff:ff:ff:ff:ff'
         ))
-        # ARP层：请求 target_ip 的MAC
         pkt.add_protocol(arp.arp(
             opcode=arp.ARP_REQUEST,
             src_mac=controller_mac,
@@ -1429,7 +1354,6 @@ class QoSController(app_manager.RyuApp):
         ))
         pkt.serialize()
 
-        # 调用现有泛洪函数发送
         self.flood_arp_to_all_switches(pkt.data)
         self.logger.info(f"[ARP Flood Trigger] 已泛洪针对 IP {target_ip} 的ARP请求")
 
