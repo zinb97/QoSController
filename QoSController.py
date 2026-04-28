@@ -247,7 +247,7 @@ class QoSController(app_manager.RyuApp):
             if success:
                 self.logger.info(f"[Multicast Route] 组播流重新下发完成: {multicast_addr}")
                 # 组播组之间间隔5秒
-                time.sleep(5)
+                # time.sleep(5)
             else:
                 self.logger.warning(f"[Multicast Route] 组播流重新下发失败: {multicast_addr}")
                 if multicast_addr in self.multicast_active_flows:
@@ -417,7 +417,7 @@ class QoSController(app_manager.RyuApp):
                 # 安装组播流规则
                 self._install_multicast_flow_rules(multicast_addr)
                 # 每个组播组之间间隔 5 秒
-                time.sleep(5)
+                # time.sleep(5)
         except Exception as e:
             self.logger.info(f'Event SwitchEnter {self.sw_name(ev.switch.dp.id)} {e}')
 
@@ -455,7 +455,7 @@ class QoSController(app_manager.RyuApp):
             # 安装组播流规则
             self._install_multicast_flow_rules(multicast_addr)
             # 每个组播组之间间隔 5 秒
-            time.sleep(5)
+            # time.sleep(5)
 
     @set_ev_cls(event.EventLinkDelete)
     def link_delete_handler(self, ev):
