@@ -55,6 +55,10 @@ class QoSController(app_manager.RyuApp):
         # 路由算法配置: 'dijkstra'=迪杰斯特拉算法, 'smart'=智能算法(默认)
         self.routing_algorithm = 'smart'
 
+        # QoS 规则配置: {rule_id: {name, src_ip, dst_ip, protocol, src_port, dst_port, dscp, priority, guarantee, enabled, src_dpid, dst_dpid, path, path_switches}}
+        self.qos_rules = {}
+        self.qos_rule_counter = 0
+
         # 拓扑相关 - 使用 networkx DiGraph
         self.graph = nx.DiGraph()        # 保存完整拓扑（节点=交换机，边=链路）
         self.adj_matrix_nodes = []       # 邻接矩阵的节点顺序列表（索引->dpid映射）
@@ -323,6 +327,194 @@ class QoSController(app_manager.RyuApp):
                     match=match,
                 )
                 sw_dp.send_msg(del_flow)
+
+    def _install_qos_flow(self, rule):
+        """为 QoS 规则安装流表
+        rule: {name, src_ip, dst_ip, protocol, src_port, dst_port, dscp, priority,
+               guarantee, src_dpid, dst_dpid, path, path_switches}
+        """
+        src_ip = rule['src_ip']
+        dst_ip = rule['dst_ip']
+        protocol = rule.get('protocol', 'any')
+        src_port = rule.get('src_port')
+        dst_port = rule.get('dst_port')
+        dscp = rule.get('dscp', 0)
+        priority = rule.get('priority', 100)
+        path_switches = rule.get('path_switches', [])
+
+        if not path_switches:
+            self.logger.warning(f"[QoS] No path_switches for rule {rule.get('name')}")
+            return False
+
+        # 确定 idle_timeout（根据保障偏好）
+        guarantee = rule.get('guarantee', 'hopcount')
+        if guarantee in ('bandwidth', 'latency', 'loss', 'load'):
+            idle_timeout = 300  # 5 minutes for QoS flows
+        else:
+            idle_timeout = 60   # 1 minute for default
+
+        for ps in path_switches:
+            sw_dp = self.datapaths.get(ps['dpid'])
+            if not sw_dp:
+                continue
+
+            parser = sw_dp.ofproto_parser
+            # 构建匹配字段
+            match_kwargs = {
+                'in_port': ps['in_port'],
+                'eth_type': ether.ETH_TYPE_IP,
+                'ipv4_src': src_ip,
+                'ipv4_dst': dst_ip,
+            }
+
+            # 添加协议和端口匹配
+            if protocol == 'tcp':
+                match_kwargs['ip_proto'] = 6
+                if dst_port:
+                    match_kwargs['tcp_dst'] = dst_port
+                if src_port:
+                    match_kwargs['tcp_src'] = src_port
+            elif protocol == 'udp':
+                match_kwargs['ip_proto'] = 17
+                if dst_port:
+                    match_kwargs['udp_dst'] = dst_port
+                if src_port:
+                    match_kwargs['udp_src'] = src_port
+            elif protocol == 'icmp':
+                match_kwargs['ip_proto'] = 1
+
+            # 添加 DSCP 标记
+            if dscp:
+                match_kwargs['ip_dscp'] = dscp
+
+            match = parser.OFPMatch(**match_kwargs)
+            actions = [parser.OFPActionOutput(ps['out_port'])]
+            self.add_flow(sw_dp, priority, match, actions, idle_timeout=idle_timeout)
+
+            # 反向流表（目的到源）
+            reverse_match_kwargs = {
+                'in_port': ps['out_port'],
+                'eth_type': ether.ETH_TYPE_IP,
+                'ipv4_src': dst_ip,
+                'ipv4_dst': src_ip,
+            }
+            if protocol == 'tcp':
+                reverse_match_kwargs['ip_proto'] = 6
+                if dst_port:
+                    reverse_match_kwargs['tcp_src'] = dst_port
+                if src_port:
+                    reverse_match_kwargs['tcp_dst'] = src_port
+            elif protocol == 'udp':
+                reverse_match_kwargs['ip_proto'] = 17
+                if dst_port:
+                    reverse_match_kwargs['udp_src'] = dst_port
+                if src_port:
+                    reverse_match_kwargs['udp_dst'] = src_port
+            elif protocol == 'icmp':
+                reverse_match_kwargs['ip_proto'] = 1
+
+            if dscp:
+                reverse_match_kwargs['ip_dscp'] = dscp
+
+            reverse_match = parser.OFPMatch(**reverse_match_kwargs)
+            reverse_actions = [parser.OFPActionOutput(ps['in_port'])]
+            self.add_flow(sw_dp, priority, reverse_match, reverse_actions, idle_timeout=idle_timeout)
+
+        self.logger.info(f"[QoS] Installed flow for rule: {rule.get('name')} ({src_ip} -> {dst_ip}, {protocol}, dscp={dscp}, priority={priority})")
+        return True
+
+    def _delete_qos_flow(self, rule):
+        """删除 QoS 规则的流表"""
+        src_ip = rule['src_ip']
+        dst_ip = rule['dst_ip']
+        protocol = rule.get('protocol', 'any')
+        src_port = rule.get('src_port')
+        dst_port = rule.get('dst_port')
+        dscp = rule.get('dscp', 0)
+        path_switches = rule.get('path_switches', [])
+
+        for ps in path_switches:
+            sw_dp = self.datapaths.get(ps['dpid'])
+            if not sw_dp:
+                continue
+
+            parser = sw_dp.ofproto_parser
+            ofproto = sw_dp.ofproto
+
+            # 构建匹配字段
+            match_kwargs = {
+                'eth_type': ether.ETH_TYPE_IP,
+                'ipv4_src': src_ip,
+                'ipv4_dst': dst_ip,
+            }
+
+            if protocol == 'tcp':
+                match_kwargs['ip_proto'] = 6
+                if dst_port:
+                    match_kwargs['tcp_dst'] = dst_port
+                if src_port:
+                    match_kwargs['tcp_src'] = src_port
+            elif protocol == 'udp':
+                match_kwargs['ip_proto'] = 17
+                if dst_port:
+                    match_kwargs['udp_dst'] = dst_port
+                if src_port:
+                    match_kwargs['udp_src'] = src_port
+            elif protocol == 'icmp':
+                match_kwargs['ip_proto'] = 1
+
+            if dscp:
+                match_kwargs['ip_dscp'] = dscp
+
+            match = parser.OFPMatch(**match_kwargs)
+            del_flow = parser.OFPFlowMod(
+                datapath=sw_dp,
+                command=ofproto.OFPFC_DELETE,
+                table_id=0,
+                priority=0,
+                out_port=ofproto.OFPP_ANY,
+                out_group=ofproto.OFPG_ANY,
+                match=match,
+            )
+            sw_dp.send_msg(del_flow)
+
+            # 删除反向流
+            reverse_match_kwargs = {
+                'eth_type': ether.ETH_TYPE_IP,
+                'ipv4_src': dst_ip,
+                'ipv4_dst': src_ip,
+            }
+            if protocol == 'tcp':
+                reverse_match_kwargs['ip_proto'] = 6
+                if dst_port:
+                    reverse_match_kwargs['tcp_src'] = dst_port
+                if src_port:
+                    reverse_match_kwargs['tcp_dst'] = src_port
+            elif protocol == 'udp':
+                reverse_match_kwargs['ip_proto'] = 17
+                if dst_port:
+                    reverse_match_kwargs['udp_src'] = dst_port
+                if src_port:
+                    reverse_match_kwargs['udp_dst'] = src_port
+            elif protocol == 'icmp':
+                reverse_match_kwargs['ip_proto'] = 1
+
+            if dscp:
+                reverse_match_kwargs['ip_dscp'] = dscp
+
+            reverse_match = parser.OFPMatch(**reverse_match_kwargs)
+            del_flow = parser.OFPFlowMod(
+                datapath=sw_dp,
+                command=ofproto.OFPFC_DELETE,
+                table_id=0,
+                priority=0,
+                out_port=ofproto.OFPP_ANY,
+                out_group=ofproto.OFPG_ANY,
+                match=reverse_match,
+            )
+            sw_dp.send_msg(del_flow)
+
+        self.logger.info(f"[QoS] Deleted flow for rule: {rule.get('name')} ({src_ip} -> {dst_ip})")
 
     def _check_update_paths(self):
         """检查所有活跃流是否有更优路径可走"""
@@ -1681,6 +1873,261 @@ class TopologyController(ControllerBase):
             self.switch_app.logger.info(f"[Routing] Reinstalled {len(reinstalled)} multicast flows, skipped {len(skipped)}")
             body = json.dumps({'success': True, 'algorithm': algorithm, 'reinstalled': reinstalled, 'skipped': skipped}, ensure_ascii=False).encode('utf-8')
             return Response(content_type='application/json; charset=UTF-8', body=body)
+        except Exception as e:
+            error_msg = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+    # ==================== QoS 规则 REST API ====================
+
+    @route('qos', '/qos/rules', methods=['GET'])
+    def get_all_qos_rules(self, req):
+        """获取所有 QoS 规则"""
+        rules = []
+        for rule_id, rule in self.switch_app.qos_rules.items():
+            rule_data = rule.copy()
+            rule_data['id'] = rule_id
+            # 将 path DPIDs 转换为名称
+            if 'path' in rule_data:
+                rule_data['path_names'] = [self.switch_app.switch_name.get(f'{p:016x}', f'{p}') for p in rule_data['path']]
+            rules.append(rule_data)
+        body = json.dumps(rules, ensure_ascii=False).encode('utf-8')
+        return Response(content_type='application/json; charset=UTF-8', body=body)
+
+    @route('qos', '/qos/rules', methods=['POST'])
+    def create_qos_rule(self, req):
+        """创建新的 QoS 规则"""
+        try:
+            data = json.loads(req.body.decode('utf-8'))
+
+            # 验证必填字段
+            required_fields = ['name', 'src_ip', 'dst_ip']
+            for field in required_fields:
+                if not data.get(field):
+                    error_msg = json.dumps({'success': False, 'error': f'Missing required field: {field}'}, ensure_ascii=False).encode('utf-8')
+                    return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+            # 验证 protocol
+            protocol = data.get('protocol', 'any')
+            if protocol not in ('any', 'tcp', 'udp', 'icmp'):
+                error_msg = json.dumps({'success': False, 'error': 'Invalid protocol. Must be any, tcp, udp, or icmp'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+            # 验证 guarantee
+            guarantee = data.get('guarantee', 'hopcount')
+            valid_guarantees = ('hopcount', 'bandwidth', 'latency', 'loss', 'load')
+            if guarantee not in valid_guarantees:
+                error_msg = json.dumps({'success': False, 'error': f'Invalid guarantee. Must be one of: {valid_guarantees}'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+            # 验证 DSCP (0-63)
+            dscp = int(data.get('dscp', 0))
+            if not (0 <= dscp <= 63):
+                error_msg = json.dumps({'success': False, 'error': 'DSCP must be between 0 and 63'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+            # 验证 priority (1-1000)
+            priority = int(data.get('priority', 100))
+            if not (1 <= priority <= 1000):
+                error_msg = json.dumps({'success': False, 'error': 'Priority must be between 1 and 1000'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+            # 查找源和目的主机的 DPID
+            src_ip = data['src_ip']
+            dst_ip = data['dst_ip']
+            src_dpid = self.switch_app.host_ip_to_dpid.get(src_ip)
+            dst_dpid = self.switch_app.host_ip_to_dpid.get(dst_ip)
+
+            if not src_dpid or not dst_dpid:
+                error_msg = json.dumps({'success': False, 'error': 'Source or destination host not found in topology'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+            # 根据 guarantee 转换为 DSCP 值用于路由计算
+            dscp_for_routing = {'bandwidth': 1, 'latency': 8, 'loss': 2, 'load': 4, 'hopcount': None}.get(guarantee)
+
+            # 计算路径
+            path = self.switch_app.get_shortest_path(src_dpid, dst_dpid, dscp_for_routing)
+            if not path or len(path) < 2:
+                error_msg = json.dumps({'success': False, 'error': 'No path found between source and destination'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+            # 获取路径上的交换机信息
+            src_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(src_ip), {})
+            dst_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(dst_ip), {})
+
+            path_switches = self.switch_app.get_path_switches(
+                path,
+                src_host.get('dpid', path[0]),
+                src_host.get('port', 1),
+                dst_host.get('dpid', path[-1]),
+                dst_host.get('port', 1)
+            )
+
+            # 生成规则 ID
+            rule_id = self.switch_app.qos_rule_counter + 1
+            self.switch_app.qos_rule_counter = rule_id
+
+            # 创建规则
+            rule = {
+                'name': data['name'],
+                'src_ip': src_ip,
+                'dst_ip': dst_ip,
+                'protocol': protocol,
+                'src_port': data.get('src_port'),
+                'dst_port': data.get('dst_port'),
+                'dscp': dscp,
+                'priority': priority,
+                'guarantee': guarantee,
+                'enabled': data.get('enabled', True),
+                'src_dpid': src_dpid,
+                'dst_dpid': dst_dpid,
+                'path': path,
+                'path_switches': path_switches
+            }
+
+            self.switch_app.qos_rules[rule_id] = rule
+
+            # 安装流表
+            if rule['enabled']:
+                self.switch_app._install_qos_flow(rule)
+
+            self.switch_app.logger.info(f"[QoS] Created rule: {rule['name']} ({src_ip} -> {dst_ip})")
+
+            # 返回创建的规则（包含 ID）
+            rule_data = rule.copy()
+            rule_data['id'] = rule_id
+            rule_data['path_names'] = [self.switch_app.switch_name.get(f'{p:016x}', f'{p}') for p in path]
+            body = json.dumps({'success': True, 'rule': rule_data}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
+
+        except Exception as e:
+            error_msg = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+    @route('qos', '/qos/rules/{rule_id}', methods=['GET'])
+    def get_qos_rule(self, req, rule_id):
+        """获取指定 QoS 规则"""
+        try:
+            rule_id = int(rule_id)
+            if rule_id not in self.switch_app.qos_rules:
+                error_msg = json.dumps({'success': False, 'error': 'Rule not found'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=404)
+
+            rule = self.switch_app.qos_rules[rule_id].copy()
+            rule['id'] = rule_id
+            if 'path' in rule:
+                rule['path_names'] = [self.switch_app.switch_name.get(f'{p:016x}', f'{p}') for p in rule['path']]
+            body = json.dumps(rule, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
+        except ValueError:
+            error_msg = json.dumps({'success': False, 'error': 'Invalid rule ID'}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+    @route('qos', '/qos/rules/{rule_id}', methods=['PUT', 'POST'])
+    def update_qos_rule(self, req, rule_id):
+        """更新指定 QoS 规则"""
+        try:
+            rule_id = int(rule_id)
+            if rule_id not in self.switch_app.qos_rules:
+                error_msg = json.dumps({'success': False, 'error': 'Rule not found'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=404)
+
+            data = json.loads(req.body.decode('utf-8'))
+            rule = self.switch_app.qos_rules[rule_id]
+
+            # 删除旧流表
+            self.switch_app._delete_qos_flow(rule)
+
+            # 更新字段
+            if 'name' in data:
+                rule['name'] = data['name']
+            if 'src_ip' in data:
+                rule['src_ip'] = data['src_ip']
+            if 'dst_ip' in data:
+                rule['dst_ip'] = data['dst_ip']
+            if 'protocol' in data:
+                rule['protocol'] = data['protocol']
+            if 'src_port' in data:
+                rule['src_port'] = data['src_port']
+            if 'dst_port' in data:
+                rule['dst_port'] = data['dst_port']
+            if 'dscp' in data:
+                rule['dscp'] = int(data['dscp'])
+            if 'priority' in data:
+                rule['priority'] = int(data['priority'])
+            if 'guarantee' in data:
+                rule['guarantee'] = data['guarantee']
+            if 'enabled' in data:
+                rule['enabled'] = data['enabled']
+
+            # 重新计算路径（如果 IP 或 guarantee 改变）
+            src_ip = rule['src_ip']
+            dst_ip = rule['dst_ip']
+            guarantee = rule['guarantee']
+            src_dpid = self.switch_app.host_ip_to_dpid.get(src_ip)
+            dst_dpid = self.switch_app.host_ip_to_dpid.get(dst_ip)
+
+            if src_dpid and dst_dpid:
+                dscp_for_routing = {'bandwidth': 1, 'latency': 8, 'loss': 2, 'load': 4, 'hopcount': None}.get(guarantee)
+                path = self.switch_app.get_shortest_path(src_dpid, dst_dpid, dscp_for_routing)
+                if path and len(path) >= 2:
+                    rule['path'] = path
+                    rule['src_dpid'] = src_dpid
+                    rule['dst_dpid'] = dst_dpid
+                    src_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(src_ip), {})
+                    dst_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(dst_ip), {})
+                    rule['path_switches'] = self.switch_app.get_path_switches(
+                        path,
+                        src_host.get('dpid', path[0]),
+                        src_host.get('port', 1),
+                        dst_host.get('dpid', path[-1]),
+                        dst_host.get('port', 1)
+                    )
+
+            # 安装新流表
+            if rule['enabled']:
+                self.switch_app._install_qos_flow(rule)
+
+            self.switch_app.logger.info(f"[QoS] Updated rule: {rule['name']} (id={rule_id})")
+
+            rule_data = rule.copy()
+            rule_data['id'] = rule_id
+            if 'path' in rule_data:
+                rule_data['path_names'] = [self.switch_app.switch_name.get(f'{p:016x}', f'{p}') for p in rule_data['path']]
+            body = json.dumps({'success': True, 'rule': rule_data}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
+
+        except ValueError:
+            error_msg = json.dumps({'success': False, 'error': 'Invalid rule ID'}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+        except Exception as e:
+            error_msg = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+    @route('qos', '/qos/rules/{rule_id}', methods=['DELETE'])
+    def delete_qos_rule(self, req, rule_id):
+        """删除指定 QoS 规则"""
+        try:
+            rule_id = int(rule_id)
+            if rule_id not in self.switch_app.qos_rules:
+                error_msg = json.dumps({'success': False, 'error': 'Rule not found'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=404)
+
+            rule = self.switch_app.qos_rules[rule_id]
+
+            # 删除流表
+            self.switch_app._delete_qos_flow(rule)
+
+            # 删除规则
+            del self.switch_app.qos_rules[rule_id]
+
+            self.switch_app.logger.info(f"[QoS] Deleted rule: {rule['name']} (id={rule_id})")
+
+            body = json.dumps({'success': True}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
+
+        except ValueError:
+            error_msg = json.dumps({'success': False, 'error': 'Invalid rule ID'}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
         except Exception as e:
             error_msg = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
             return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)

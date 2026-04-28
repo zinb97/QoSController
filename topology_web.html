@@ -811,6 +811,17 @@
                 </div>
             </div>
 
+            <div class="sidebar-section" id="qosSection">
+                <div class="section-title" onclick="toggleSection('qosSection')">QoS Rules</div>
+                <div class="switch-list" id="qosRuleList">
+                    <div class="switch-item">
+                        <div class="switch-info">
+                            <div class="switch-name">Loading...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="sidebar-section" id="multicastFlowsSection">
                 <div class="section-title" onclick="toggleSection('multicastFlowsSection')">Multicast Active Flows</div>
                 <div class="switch-list" id="multicastFlowList">
@@ -1493,11 +1504,13 @@
             updateActiveFlows();
             updateMulticastWeights();
             updateMulticastActiveFlows();
+            updateQosRules();
             loadRoutingAlgorithm();
             setInterval(updateTopology, 2000);
             setInterval(updateActiveFlows, 2000);
             setInterval(updateMulticastWeights, 5000);
             setInterval(updateMulticastActiveFlows, 2000);
+            setInterval(updateQosRules, 5000);
         };
 
         // Switch click handler for flow table
@@ -1905,16 +1918,24 @@
         }
 
         // Close weight modal on outside click
-        document.getElementById('weightModal').addEventListener('click', function(e) {
-            if (e.target === this) {
-                closeWeightModal();
-            }
-        });
+        const weightModal = document.getElementById('weightModal');
+        if (weightModal) {
+            weightModal.addEventListener('click', function(e) {
+                if (e.target === this) {
+                    closeWeightModal();
+                }
+            });
+        }
 
         // Close weight modal on Escape key
         document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape' && document.getElementById('weightModal').classList.contains('active')) {
+            const wm = document.getElementById('weightModal');
+            if (wm && wm.classList.contains('active') && e.key === 'Escape') {
                 closeWeightModal();
+            }
+            const qm = document.getElementById('qosModal');
+            if (qm && qm.classList.contains('active') && e.key === 'Escape') {
+                closeQosModal();
             }
         });
 
@@ -1977,6 +1998,195 @@
                 console.log('Failed to change routing algorithm:', e);
             }
         }
+
+        // ==================== QoS Rules Functions ====================
+        let currentQosRuleId = null;
+
+        async function updateQosRules() {
+            try {
+                const response = await fetch('/qos/rules');
+                if (!response.ok) return;
+                const rules = await response.json();
+
+                const list = document.getElementById('qosRuleList');
+
+                // Always show "Add New" button at the top
+                let html = `
+                    <div class="switch-item" onclick="openQosModal()" style="cursor: pointer; border-style: dashed; border-color: #f39c12;">
+                        <div class="switch-icon" style="background:#f39c12">+</div>
+                        <div class="switch-info">
+                            <div class="switch-name">Add New QoS Rule</div>
+                            <div class="switch-dpid">Click to create a new rule</div>
+                        </div>
+                    </div>
+                `;
+
+                if (!rules || rules.length === 0) {
+                    list.innerHTML = html;
+                } else {
+                    list.innerHTML = html + rules.map(rule => {
+                        const guaranteeIcon = {
+                            'hopcount': '→',
+                            'bandwidth': '↑',
+                            'latency': '⏱',
+                            'loss': '↓',
+                            'load': '↔'
+                        }[rule.guarantee] || '→';
+                        return `
+                            <div class="switch-item" onclick="openQosModal(${rule.id})" style="cursor: pointer;">
+                                <div class="switch-icon" style="background:#f39c12">${guaranteeIcon}</div>
+                                <div class="switch-info">
+                                    <div class="switch-name">${rule.name}</div>
+                                    <div class="switch-dpid">${rule.src_ip} → ${rule.dst_ip} | ${rule.protocol} | DSCP:${rule.dscp} | ${rule.guarantee}</div>
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                }
+            } catch (e) {
+                console.log('Failed to fetch QoS rules:', e);
+            }
+        }
+
+        function openQosModal(ruleId) {
+            currentQosRuleId = ruleId || null;
+            document.getElementById('modalQosTitle').textContent = ruleId ? ' - Edit Rule' : ' - New Rule';
+            document.getElementById('qosSuccess').style.display = 'none';
+            document.getElementById('qosError').style.display = 'none';
+            document.getElementById('qosDeleteBtn').style.display = ruleId ? 'inline-block' : 'none';
+
+            if (ruleId) {
+                // Load existing rule
+                fetch('/qos/rules/' + ruleId)
+                    .then(r => r.json())
+                    .then(rule => {
+                        document.getElementById('qosName').value = rule.name || '';
+                        document.getElementById('qosSrcIp').value = rule.src_ip || '';
+                        document.getElementById('qosDstIp').value = rule.dst_ip || '';
+                        document.getElementById('qosProtocol').value = rule.protocol || 'any';
+                        document.getElementById('qosSrcPort').value = rule.src_port || '';
+                        document.getElementById('qosDstPort').value = rule.dst_port || '';
+                        document.getElementById('qosDscp').value = rule.dscp || 0;
+                        document.getElementById('qosPriority').value = rule.priority || 100;
+                        document.getElementById('qosGuarantee').value = rule.guarantee || 'hopcount';
+                    })
+                    .catch(e => console.log('Failed to load QoS rule:', e));
+            } else {
+                // New rule - reset form
+                document.getElementById('qosName').value = '';
+                document.getElementById('qosSrcIp').value = '';
+                document.getElementById('qosDstIp').value = '';
+                document.getElementById('qosProtocol').value = 'any';
+                document.getElementById('qosSrcPort').value = '';
+                document.getElementById('qosDstPort').value = '';
+                document.getElementById('qosDscp').value = 0;
+                document.getElementById('qosPriority').value = 100;
+                document.getElementById('qosGuarantee').value = 'hopcount';
+            }
+
+            document.getElementById('qosModal').classList.add('active');
+        }
+
+        function closeQosModal() {
+            document.getElementById('qosModal').classList.remove('active');
+            currentQosRuleId = null;
+        }
+
+        async function saveQosRule() {
+            const name = document.getElementById('qosName').value.trim();
+            const srcIp = document.getElementById('qosSrcIp').value.trim();
+            const dstIp = document.getElementById('qosDstIp').value.trim();
+            const protocol = document.getElementById('qosProtocol').value;
+            const srcPort = document.getElementById('qosSrcPort').value;
+            const dstPort = document.getElementById('qosDstPort').value;
+            const dscp = parseInt(document.getElementById('qosDscp').value) || 0;
+            const priority = parseInt(document.getElementById('qosPriority').value) || 100;
+            const guarantee = document.getElementById('qosGuarantee').value;
+
+            if (!name || !srcIp || !dstIp) {
+                document.getElementById('qosError').textContent = 'Please fill in name, source IP, and destination IP';
+                document.getElementById('qosError').style.display = 'block';
+                return;
+            }
+
+            const ruleData = {
+                name: name,
+                src_ip: srcIp,
+                dst_ip: dstIp,
+                protocol: protocol,
+                src_port: srcPort ? parseInt(srcPort) : null,
+                dst_port: dstPort ? parseInt(dstPort) : null,
+                dscp: dscp,
+                priority: priority,
+                guarantee: guarantee
+            };
+
+            try {
+                showLoading('Saving QoS rule...');
+                const url = currentQosRuleId ? `/qos/rules/${currentQosRuleId}` : '/qos/rules';
+                const method = currentQosRuleId ? 'PUT' : 'POST';
+
+                const response = await fetch(url, {
+                    method: method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(ruleData)
+                });
+
+                hideLoading();
+
+                if (response.ok) {
+                    document.getElementById('qosSuccess').style.display = 'block';
+                    setTimeout(() => {
+                        closeQosModal();
+                        updateQosRules();
+                    }, 1000);
+                } else {
+                    const data = await response.json();
+                    document.getElementById('qosError').textContent = data.error || 'Failed to save QoS rule';
+                    document.getElementById('qosError').style.display = 'block';
+                }
+            } catch (e) {
+                hideLoading();
+                document.getElementById('qosError').textContent = 'Failed to save QoS rule';
+                document.getElementById('qosError').style.display = 'block';
+            }
+        }
+
+        async function deleteQosRule() {
+            if (!currentQosRuleId) {
+                closeQosModal();
+                return;
+            }
+
+            try {
+                showLoading('Deleting QoS rule...');
+                const response = await fetch(`/qos/rules/${currentQosRuleId}`, {
+                    method: 'DELETE'
+                });
+                hideLoading();
+
+                if (response.ok) {
+                    closeQosModal();
+                    updateQosRules();
+                }
+            } catch (e) {
+                hideLoading();
+                console.log('Failed to delete QoS rule:', e);
+            }
+        }
+
+        // Close QoS modal on outside click
+        const qosModal = document.getElementById('qosModal');
+        if (qosModal) {
+            qosModal.addEventListener('click', function(e) {
+                if (e.target === this) {
+                    closeQosModal();
+                }
+            });
+        }
+
+        // Close QoS modal on Escape key
+        // (handled in the keyboard handler above)
     </script>
 
     <!-- Multicast Weight Modal -->
@@ -2134,7 +2344,256 @@
             margin-top: 8px;
             display: none;
         }
+
+        /* QoS Modal Styles */
+        .qos-modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .qos-modal-overlay.active {
+            display: flex;
+        }
+
+        .qos-modal {
+            background: #1c2128;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 600px;
+            max-height: 85vh;
+            overflow-y: auto;
+        }
+
+        .qos-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            border-bottom: 1px solid #30363d;
+        }
+
+        .qos-modal-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+
+        .qos-modal-close {
+            background: none;
+            border: none;
+            color: #8b949e;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1;
+        }
+
+        .qos-modal-close:hover {
+            color: #f0f6fc;
+        }
+
+        .qos-modal-body {
+            padding: 20px;
+        }
+
+        .qos-form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .qos-form-group {
+            margin-bottom: 16px;
+        }
+
+        .qos-form-group label {
+            display: block;
+            font-size: 12px;
+            color: #8b949e;
+            margin-bottom: 6px;
+        }
+
+        .qos-form-group input,
+        .qos-form-group select {
+            width: 100%;
+            padding: 10px 12px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #e6edf3;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+        }
+
+        .qos-form-group input:focus,
+        .qos-form-group select:focus {
+            outline: none;
+            border-color: #58a6ff;
+        }
+
+        .qos-form-group select {
+            cursor: pointer;
+        }
+
+        .qos-info {
+            font-size: 11px;
+            color: #8b949e;
+            margin-top: 4px;
+        }
+
+        .qos-modal-footer {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+            padding: 16px 20px;
+            border-top: 1px solid #30363d;
+        }
+
+        .qos-success {
+            color: #3fb950;
+            font-size: 12px;
+            margin-top: 8px;
+            display: none;
+        }
+
+        .qos-error {
+            color: #f85149;
+            font-size: 12px;
+            margin-top: 8px;
+            display: none;
+        }
+
+        .qos-rule-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 12px;
+            background: #1c2128;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            cursor: pointer;
+        }
+
+        .qos-rule-item:hover {
+            border-color: #58a6ff;
+        }
+
+        .qos-rule-icon {
+            width: 28px;
+            height: 28px;
+            background: #f39c12;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+        }
+
+        .qos-rule-info {
+            flex: 1;
+        }
+
+        .qos-rule-name {
+            font-size: 13px;
+            font-weight: 500;
+            color: #e6edf3;
+        }
+
+        .qos-rule-details {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: #9ba4b0;
+        }
     </style>
+
+    <!-- QoS Rule Modal -->
+    <div class="qos-modal-overlay" id="qosModal">
+        <div class="qos-modal">
+            <div class="qos-modal-header">
+                <div class="qos-modal-title">
+                    QoS Rule Configuration
+                    <span id="modalQosTitle"></span>
+                </div>
+                <button class="qos-modal-close" onclick="closeQosModal()">&times;</button>
+            </div>
+            <div class="qos-modal-body">
+                <div class="qos-form-group">
+                    <label>Rule Name (规则名称)</label>
+                    <input type="text" id="qosName" placeholder="e.g., Video Conference">
+                </div>
+                <div class="qos-form-row">
+                    <div class="qos-form-group">
+                        <label>Source IP (源 IP)</label>
+                        <input type="text" id="qosSrcIp" placeholder="e.g., 10.0.0.1">
+                    </div>
+                    <div class="qos-form-group">
+                        <label>Destination IP (目的 IP)</label>
+                        <input type="text" id="qosDstIp" placeholder="e.g., 10.0.0.2">
+                    </div>
+                </div>
+                <div class="qos-form-row">
+                    <div class="qos-form-group">
+                        <label>Protocol (协议)</label>
+                        <select id="qosProtocol">
+                            <option value="any">Any</option>
+                            <option value="tcp">TCP</option>
+                            <option value="udp">UDP</option>
+                            <option value="icmp">ICMP</option>
+                        </select>
+                    </div>
+                    <div class="qos-form-group">
+                        <label>DSCP Value (0-63)</label>
+                        <input type="number" id="qosDscp" min="0" max="63" value="0">
+                        <div class="qos-info">IP precedence: Higher = more important</div>
+                    </div>
+                </div>
+                <div class="qos-form-row">
+                    <div class="qos-form-group">
+                        <label>Source Port (源端口, optional)</label>
+                        <input type="number" id="qosSrcPort" min="1" max="65535" placeholder="e.g., 5000">
+                    </div>
+                    <div class="qos-form-group">
+                        <label>Destination Port (目的端口, optional)</label>
+                        <input type="number" id="qosDstPort" min="1" max="65535" placeholder="e.g., 80">
+                    </div>
+                </div>
+                <div class="qos-form-row">
+                    <div class="qos-form-group">
+                        <label>Priority (优先级 1-1000)</label>
+                        <input type="number" id="qosPriority" min="1" max="1000" value="100">
+                        <div class="qos-info">Higher = more important</div>
+                    </div>
+                    <div class="qos-form-group">
+                        <label>Guarantee Preference (保障偏好)</label>
+                        <select id="qosGuarantee">
+                            <option value="hopcount">Default (默认规则)</option>
+                            <option value="bandwidth">Bandwidth (带宽优先)</option>
+                            <option value="latency">Latency (延迟优先)</option>
+                            <option value="loss">Loss Rate (丢包率优先)</option>
+                            <option value="load">Load Balance (负载均衡)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="qos-success" id="qosSuccess">QoS rule saved successfully!</div>
+                <div class="qos-error" id="qosError">Failed to save QoS rule</div>
+            </div>
+            <div class="qos-modal-footer">
+                <button class="btn btn-delete" id="qosDeleteBtn" onclick="deleteQosRule()">Delete</button>
+                <button class="btn btn-cancel" onclick="closeQosModal()">Cancel</button>
+                <button class="btn btn-save" onclick="saveQosRule()">Save</button>
+            </div>
+        </div>
+    </div>
 
     <div class="weight-modal-overlay" id="weightModal">
         <div class="weight-modal">
