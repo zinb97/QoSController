@@ -2025,11 +2025,12 @@
                 } else {
                     list.innerHTML = html + rules.map(rule => {
                         const guaranteeIcon = {
-                            'hopcount': '→',
+                            'default': '→',
                             'bandwidth': '↑',
                             'latency': '⏱',
-                            'loss': '↓',
-                            'load': '↔'
+                            'lossrate': '↓',
+                            'loadbalance': '↔',
+                            'smartalgorithm': '✦'
                         }[rule.guarantee] || '→';
                         return `
                             <div class="switch-item" onclick="openQosModal(${rule.id})" style="cursor: pointer;">
@@ -2067,7 +2068,7 @@
                         document.getElementById('qosDstPort').value = rule.dst_port || '';
                         document.getElementById('qosDscp').value = rule.dscp || 0;
                         document.getElementById('qosPriority').value = rule.priority || 100;
-                        document.getElementById('qosGuarantee').value = rule.guarantee || 'hopcount';
+                        document.getElementById('qosGuarantee').value = rule.guarantee || 'default';
                     })
                     .catch(e => console.log('Failed to load QoS rule:', e));
             } else {
@@ -2080,7 +2081,7 @@
                 document.getElementById('qosDstPort').value = '';
                 document.getElementById('qosDscp').value = 0;
                 document.getElementById('qosPriority').value = 100;
-                document.getElementById('qosGuarantee').value = 'hopcount';
+                document.getElementById('qosGuarantee').value = 'default';
             }
 
             document.getElementById('qosModal').classList.add('active');
@@ -2575,11 +2576,12 @@
                     <div class="qos-form-group">
                         <label>Guarantee Preference (保障偏好)</label>
                         <select id="qosGuarantee">
-                            <option value="hopcount">Default (默认规则)</option>
+                            <option value="default">Default (默认规则)</option>
                             <option value="bandwidth">Bandwidth (带宽优先)</option>
                             <option value="latency">Latency (延迟优先)</option>
-                            <option value="loss">Loss Rate (丢包率优先)</option>
-                            <option value="load">Load Balance (负载均衡)</option>
+                            <option value="lossrate">Loss Rate (丢包率优先)</option>
+                            <option value="loadbalance">Load Balance (负载均衡)</option>
+                            <option value="smartalgorithm">Smart Algorithm (综合考虑)</option>
                         </select>
                     </div>
                 </div>

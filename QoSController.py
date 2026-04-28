@@ -3,6 +3,7 @@ import os
 import threading
 import time
 from collections import deque
+from enum import Enum
 from typing import List
 
 import networkx as nx
@@ -23,6 +24,15 @@ import utils
 from client import RL_multicast_tree
 
 topology_api_name = 'topology_api'
+
+
+class WeightPref(Enum):
+    Default = 0
+    Latency = 1
+    LoadBalance = 2
+    LossRate = 3
+    SmartAlgorithm = 4
+    Bandwidth = 5
 
 
 class QoSController(app_manager.RyuApp):
@@ -327,13 +337,7 @@ class QoSController(app_manager.RyuApp):
         if not path_switches:
             self.logger.warning(f"[QoS] No path_switches for rule {rule.get('name')}")
             return False
-
-        # 确定 idle_timeout（根据保障偏好）
-        guarantee = rule.get('guarantee', 'hopcount')
-        if guarantee in ('bandwidth', 'latency', 'loss', 'load'):
-            idle_timeout = 300  # 5 minutes for QoS flows
-        else:
-            idle_timeout = 60   # 1 minute for default
+        idle_timeout = 0
 
         for ps in path_switches:
             sw_dp = self.datapaths.get(ps['dpid'])
@@ -1562,7 +1566,7 @@ class QoSController(app_manager.RyuApp):
         datapath.send_msg(mod)
 
     # ==================== 最短路径（使用 networkx） ====================
-    def get_shortest_path(self, src, dst, dscp=None) -> List[int]:
+    def get_shortest_path(self, src, dst, preference=None):
         """使用 networkx Dijkstra 算法计算最短路径
         dscp: 1=时延优先, 2=负载优先, 3=丢包率优先, 4=带宽优先, None=跳数
         """
@@ -1571,21 +1575,24 @@ class QoSController(app_manager.RyuApp):
         if src not in self.graph or dst not in self.graph:
             return []
         try:
-            if dscp == 1:
+            if preference == WeightPref.Bandwidth:
                 def weight_bw(u, v, d):
                     bw = d.get("bw", 0)
                     return 1.0 / (bw + 0.001)
                 path = nx.shortest_path(self.graph, src, dst, weight=weight_bw)
-            elif dscp == 2:
+            elif preference == WeightPref.LossRate:
                 path = nx.shortest_path(self.graph, src, dst, weight='loss')
-            elif dscp == 4:
+            elif preference == WeightPref.LoadBalance:
                 def weight_load(u, v, d):
                     bw = d.get("bw", 0.1)
                     load= d.get("total_bps", 0)
                     return 1 / (bw - load) if bw != load else 999
                 path = nx.shortest_path(self.graph, src, dst, weight=weight_load)
-            elif dscp == 8:
+            elif preference == WeightPref.Latency:
                 path = nx.shortest_path(self.graph, src, dst, weight='delay')
+            elif preference == WeightPref.SmartAlgorithm:
+                # todo 调用智能算法
+                path = nx.shortest_path(self.graph, src, dst)
             else:
                 path = nx.shortest_path(self.graph, src, dst)
             return path
@@ -1867,8 +1874,8 @@ class TopologyController(ControllerBase):
                 return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
 
             # 验证 guarantee
-            guarantee = data.get('guarantee', 'hopcount')
-            valid_guarantees = ('hopcount', 'bandwidth', 'latency', 'loss', 'load')
+            guarantee = data.get('guarantee', 'default')
+            valid_guarantees = ('default', 'bandwidth', 'latency', 'lossrate', 'loadbalance', 'smartslgorithm')
             if guarantee not in valid_guarantees:
                 error_msg = json.dumps({'success': False, 'error': f'Invalid guarantee. Must be one of: {valid_guarantees}'}, ensure_ascii=False).encode('utf-8')
                 return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
@@ -1895,11 +1902,19 @@ class TopologyController(ControllerBase):
                 error_msg = json.dumps({'success': False, 'error': 'Source or destination host not found in topology'}, ensure_ascii=False).encode('utf-8')
                 return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
 
-            # 根据 guarantee 转换为 DSCP 值用于路由计算
-            dscp_for_routing = {'bandwidth': 1, 'latency': 8, 'loss': 2, 'load': 4, 'hopcount': None}.get(guarantee)
+            # 根据 guarantee 转换为 WeightPref 枚举用于路由计算
+            pref_map = {
+                'default': None,
+                'bandwidth': WeightPref.Bandwidth,
+                'latency': WeightPref.Latency,
+                'lossrate': WeightPref.LossRate,
+                'loadbalance': WeightPref.LoadBalance,
+                'smartslgorithm': WeightPref.SmartAlgorithm
+            }
+            preference = pref_map.get(guarantee)
 
             # 计算路径
-            path = self.switch_app.get_shortest_path(src_dpid, dst_dpid, dscp_for_routing)
+            path = self.switch_app.get_shortest_path(src_dpid, dst_dpid, preference)
             if not path or len(path) < 2:
                 error_msg = json.dumps({'success': False, 'error': 'No path found between source and destination'}, ensure_ascii=False).encode('utf-8')
                 return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
