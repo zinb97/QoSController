@@ -143,7 +143,7 @@ class ChinaBackboneTopo(Topo):
         # 全互联
         self.addLink(self.core['bj'], self.core['sh'], bw=400, delay='1ms', loss=0.1, cls=TCLink)
         self.addLink(self.core['bj'], self.core['gz'], bw=400, delay='2ms', loss=0.1, cls=TCLink)
-        self.addLink(self.core['sh'], self.core['gz'], bw=400, delay='3ms', loss=0.1, cls=TCLink)
+        self.addLink(self.core['sh'], self.core['gz'], bw=400, delay='5ms', loss=3, cls=TCLink)
 
     def _build_agg(self):
         """汇聚层：西安、成都、武汉、南京、沈阳"""
@@ -152,18 +152,18 @@ class ChinaBackboneTopo(Topo):
             dpid = f'00000000{NetworkLevel.AGG.value:02x}{idx:02x}0001'
             self.agg[city] = self.addSwitch(f'A{idx}', dpid=dpid, protocols='OpenFlow13')
         # 上联核心
-        self.addLink(self.agg['xa'], self.core['bj'], bw=300, delay='6ms', loss=0.5, cls=TCLink)
-        self.addLink(self.agg['xa'], self.core['sh'], bw=250, delay='8ms', loss=1, cls=TCLink)
+        self.addLink(self.agg['xa'], self.core['bj'], bw=300, delay='10ms', loss=0.5, cls=TCLink)
+        self.addLink(self.agg['xa'], self.core['sh'], bw=250, delay='5ms', loss=1, cls=TCLink)
         self.addLink(self.agg['cd'], self.core['bj'], bw=300, delay='10ms', loss=1.5, cls=TCLink)
-        self.addLink(self.agg['wh'], self.core['bj'], bw=350, delay='13ms', loss=0.5, cls=TCLink)
-        self.addLink(self.agg['nj'], self.core['sh'], bw=400, delay='10ms', loss=1, cls=TCLink)
-        self.addLink(self.agg['sy'], self.core['gz'], bw=300, delay='5ms', loss=0.5, cls=TCLink)
+        self.addLink(self.agg['wh'], self.core['bj'], bw=350, delay='15ms', loss=0.5, cls=TCLink)
+        self.addLink(self.agg['nj'], self.core['sh'], bw=400, delay='10ms', loss=2.5, cls=TCLink)
+        self.addLink(self.agg['sy'], self.core['gz'], bw=300, delay='5ms', loss=3, cls=TCLink)
         # 汇聚相连
-        self.addLink(self.agg['xa'], self.agg['wh'], bw=150, delay='20ms', loss=2, cls=TCLink)
-        self.addLink(self.agg['cd'], self.agg['wh'], bw=200, delay='15ms', loss=3, cls=TCLink)
-        self.addLink(self.agg['xa'], self.agg['nj'], bw=200, delay='18ms', loss=2, cls=TCLink)
-        self.addLink(self.agg['nj'], self.agg['sy'], bw=250, delay='28ms', loss=3, cls=TCLink)
-        self.addLink(self.agg['sy'], self.agg['cd'], bw=200, delay='32ms', loss=2, cls=TCLink)
+        self.addLink(self.agg['xa'], self.agg['wh'], bw=150, delay='5ms', loss=2, cls=TCLink)
+        self.addLink(self.agg['cd'], self.agg['wh'], bw=200, delay='10ms', loss=3, cls=TCLink)
+        self.addLink(self.agg['xa'], self.agg['nj'], bw=200, delay='10ms', loss=2, cls=TCLink)
+        self.addLink(self.agg['nj'], self.agg['sy'], bw=250, delay='20ms', loss=0.5, cls=TCLink)
+        self.addLink(self.agg['sy'], self.agg['cd'], bw=200, delay='15ms', loss=1, cls=TCLink)
 
     def _build_access(self):
         """骨干接入层：简化5节点 / 全量23节点"""

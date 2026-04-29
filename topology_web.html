@@ -589,6 +589,14 @@
                 <div class="status-dot"></div>
                 <span>Controller Connected</span>
             </div>
+            <div class="status-item" style="margin-left: 16px;">
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    <input type="checkbox" id="linkEventToggle" checked
+                           onchange="toggleLinkEvent(this.checked)"
+                           style="width: 16px; height: 16px; cursor: pointer;">
+                    <span id="linkEventLabel" style="font-size: 13px;">Link Events: ON</span>
+                </label>
+            </div>
         </div>
     </header>
 
@@ -1497,6 +1505,40 @@
             }
         }
 
+        let linkEventEnabled = true;
+
+        async function toggleLinkEvent(enabled) {
+            try {
+                const response = await fetch('/link_event', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({enabled: enabled})
+                });
+                const data = await response.json();
+                if (data.success) {
+                    linkEventEnabled = data.enabled;
+                    document.getElementById('linkEventLabel').textContent =
+                        data.enabled ? 'Link Events: ON' : 'Link Events: OFF';
+                    document.getElementById('linkEventToggle').checked = data.enabled;
+                }
+            } catch (e) {
+                console.error('Failed to toggle link event:', e);
+            }
+        }
+
+        async function loadLinkEventState() {
+            try {
+                const response = await fetch('/link_event');
+                const data = await response.json();
+                linkEventEnabled = data.enabled;
+                document.getElementById('linkEventLabel').textContent =
+                    data.enabled ? 'Link Events: ON' : 'Link Events: OFF';
+                document.getElementById('linkEventToggle').checked = data.enabled;
+            } catch (e) {
+                console.error('Failed to load link event state:', e);
+            }
+        }
+
         window.onload = function() {
             initNetwork();
             updateTopology();
@@ -1505,6 +1547,7 @@
             updateMulticastActiveFlows();
             updateQosRules();
             loadRoutingAlgorithm();
+            loadLinkEventState();
             setInterval(updateTopology, 2000);
             setInterval(updateActiveFlows, 2000);
             setInterval(updateMulticastWeights, 5000);

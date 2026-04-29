@@ -94,6 +94,9 @@ class QoSController(app_manager.RyuApp):
         self._link_delete_pending = {}  # {(src_dpid, src_port, dst_dpid, dst_port): pending_timer}
         self._link_delete_delay = 5     # 延迟秒数再删除链路
 
+        # 链路事件处理开关
+        self.link_event_enabled = True  # 默认开启
+
         # 抑制 WSGI HTTP 请求日志
         # 原始实现使用 LoggingWrapper 写日志到 LOG.info
         _original_serve_forever = hub.WSGIServer.serve_forever
@@ -634,6 +637,10 @@ class QoSController(app_manager.RyuApp):
 
     @set_ev_cls(event.EventLinkAdd)
     def link_add_handler(self, ev):
+        if not self.link_event_enabled:
+            self.logger.debug(f"[Link Event] Link add ignored (disabled): {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> {self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
+            return
+
         link_key = (ev.link.src.dpid, ev.link.src.port_no, ev.link.dst.dpid, ev.link.dst.port_no)
 
         # 如果链路之前触发过 pending delete，取消删除
@@ -669,6 +676,10 @@ class QoSController(app_manager.RyuApp):
 
     @set_ev_cls(event.EventLinkDelete)
     def link_delete_handler(self, ev):
+        if not self.link_event_enabled:
+            self.logger.debug(f"[Link Event] Link delete ignored (disabled): {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> {self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
+            return
+
         link_key = (ev.link.src.dpid, ev.link.src.port_no, ev.link.dst.dpid, ev.link.dst.port_no)
 
         # 如果已经在 pending 状态，不再重复处理
@@ -1597,6 +1608,23 @@ class TopologyController(ControllerBase):
     def get_topo_data(self, req):
         body = json.dumps(self.switch_app.topology_data, ensure_ascii=False).encode('utf-8')
         return Response(content_type='application/json; charset=UTF-8', body=body)
+
+    @route('topology', '/link_event', methods=['GET', 'POST'])
+    def set_link_event(self, req):
+        """获取或设置链路事件处理开关"""
+        if req.method == 'GET':
+            body = json.dumps({'enabled': self.switch_app.link_event_enabled}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
+        else:
+            try:
+                body = json.loads(req.body.decode('utf-8'))
+                enabled = body.get('enabled', True)
+                self.switch_app.link_event_enabled = enabled
+                response = json.dumps({'success': True, 'enabled': enabled}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=response)
+            except Exception as e:
+                response = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=response)
 
     @route('topology', '/flows/active', methods=['GET'])
     def get_active_flows(self, req):
