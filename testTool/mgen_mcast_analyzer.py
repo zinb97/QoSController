@@ -2,6 +2,7 @@ import os
 import re
 from datetime import datetime
 from collections import defaultdict
+import glob
 
 import matplotlib.pyplot as plt
 
@@ -12,8 +13,6 @@ plt.rcParams['axes.unicode_minus'] = False
 # ===================== 配置 =====================
 TEST_PATH = '/home/hello/jcyz_ceshi/QoSController/testTool'
 LOG_PATTERN = "/home/hello/jcyz_ceshi/QoSController/mcast_recv_h*.log"
-OUTPUT_CSV = "mgen_mcast_result.csv"
-SUMMARY_FILE = "mgen_mcast_summary.txt"
 # =================================================
 
 def parse_time(time_str):
@@ -97,9 +96,9 @@ def compute_loss(summary):
     loss_rate = (lost / expected) * 100 if expected > 0 else 0.0
     return recv, expected, lost, loss_rate
 
-def summary(flow_summary):
+def print_summary(flow_summary):
     print("=" * 60 + "\n")
-    print("            组播MGEN 测试结果汇总\n")
+    print("            Multicast MGEN Test Summary\n")
     print("=" * 60 + "\n\n")
     for flow in sorted(flow_summary):
         s = flow_summary[flow]
@@ -111,23 +110,23 @@ def summary(flow_summary):
         min_d = min(delays) if delays else 0
         max_d = max(delays) if delays else 0
 
-        print(f"【流 {flow}】")
-        print(f"  测试时长    : {duration:.2f} s")
-        print(f"  期望收包    : {expected}")
-        print(f"  实际收包    : {recv}")
-        print(f"  丢包数      : {lost}")
-        print(f"  丢包率      : {loss_rate:.2f} %")
-        print(f"  平均带宽    : {bw_mbps:.3f} Mbps")
-        print(f"  平均时延    : {avg_d:.2f} ms")
-        print(f"  最小时延    : {min_d:.2f} ms")
-        print(f"  最大时延    : {max_d:.2f} ms")
+        print(f"[Flow {flow}]")
+        print(f"  Duration     : {duration:.2f} s")
+        print(f"  Expected     : {expected}")
+        print(f"  Received     : {recv}")
+        print(f"  Lost         : {lost}")
+        print(f"  Loss Rate    : {loss_rate:.2f} %")
+        print(f"  Avg Bandwidth: {bw_mbps:.3f} Mbps")
+        print(f"  Avg Delay    : {avg_d:.2f} ms")
+        print(f"  Min Delay    : {min_d:.2f} ms")
+        print(f"  Max Delay    : {max_d:.2f} ms")
         print()
 
-def write_detail_csv(flow_summary, sec_stats):
+def plot_stats(flow_summary, sec_stats, output_prefix):
     """绘制每秒详细折线图"""
     flows = sorted(sec_stats.keys())
     if not flows:
-        print("[!] 无数据可绘图")
+        print("[!] No data to plot")
         return
 
     min_start = min(
@@ -171,7 +170,7 @@ def write_detail_csv(flow_summary, sec_stats):
     for flow in flows:
         ax_bw.plot(time_data[flow], bw_data[flow], marker='.', label=f'Flow {flow}', linewidth=1.5)
     ax_bw.set_ylabel('Bandwidth (Mbps)')
-    ax_bw.set_title('Multicast MGEN Test - BW/Delay/Loss')
+    ax_bw.set_title(f'Multicast MGEN Test - {output_prefix}')
     ax_bw.legend(loc='upper right')
     ax_bw.grid(True, alpha=0.3)
 
@@ -191,73 +190,108 @@ def write_detail_csv(flow_summary, sec_stats):
     ax_loss.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(OUTPUT_CSV.replace('.csv', '.png'), dpi=150)
-    print(f"[+] Chart saved: {OUTPUT_CSV.replace('.csv', '.png')}")
+    output_png = f"{output_prefix}.png"
+    plt.savefig(output_png, dpi=150)
+    print(f"[+] Chart saved: {output_png}")
+    plt.close()
 
-def find_log_files(path, pattern):
-    """查找匹配模式的日志文件"""
-    import glob
-    search_pattern = os.path.join(path, pattern)
-    return sorted(glob.glob(search_pattern))
+def process_single_log(log_file):
+    """处理单个日志文件"""
+    print(f"\n[+] Processing: {log_file}")
 
-def main():
-    print("[+] 查找日志文件...")
-    log_files = find_log_files(TEST_PATH, LOG_PATTERN)
+    flow_summary, sec_stats = parse_mcast_log(log_file)
 
-    if not log_files:
-        print(f"[!] 未找到匹配文件: {LOG_PATTERN}")
+    if not flow_summary:
+        print(f"[!] No data found in {log_file}")
         return
 
-    print(f"[+] 找到 {len(log_files)} 个日志文件")
+    # 提取文件名作为前缀
+    basename = os.path.basename(log_file)
+    prefix = basename.replace('.log', '')
 
-    # 合并所有日志文件的统计
-    combined_flow_summary = defaultdict(lambda: {
-        "start": None,
-        "end": None,
-        "total_bytes": 0,
-        "recv_seqs": set(),
-        "min_seq": None,
-        "max_seq": None,
-        "delays": [],
-    })
-    combined_sec_stats = defaultdict(lambda: defaultdict(lambda: {
-        "bytes": 0,
-        "delays": [],
-        "seqs": set(),
-    }))
+    print_summary(flow_summary)
+    plot_stats(flow_summary, sec_stats, prefix)
+
+def main():
+    print("[+] Searching log files...")
+    log_files = sorted(glob.glob(LOG_PATTERN))
+
+    if not log_files:
+        print(f"[!] No files match: {LOG_PATTERN}")
+        return
+
+    print(f"[+] Found {len(log_files)} log files")
+
+    # 收集所有日志数据
+    all_data = []  # [(label, flow_summary, sec_stats), ...]
 
     for log_file in log_files:
-        print(f"[+] 解析日志: {log_file}")
+        print(f"[+] Parsing: {log_file}")
         flow_summary, sec_stats = parse_mcast_log(log_file)
+        if flow_summary:
+            label = os.path.basename(log_file).replace('.log', '')
+            all_data.append((label, flow_summary, sec_stats))
 
-        for flow, s in flow_summary.items():
-            combined = combined_flow_summary[flow]
-            combined["total_bytes"] += s["total_bytes"]
-            combined["recv_seqs"].update(s["recv_seqs"])
-            combined["delays"].extend(s["delays"])
+    if not all_data:
+        print("[!] No data found")
+        return
 
-            if combined["min_seq"] is None or s["min_seq"] < combined["min_seq"]:
-                combined["min_seq"] = s["min_seq"]
-            if combined["max_seq"] is None or s["max_seq"] > combined["max_seq"]:
-                combined["max_seq"] = s["max_seq"]
-            if combined["start"] is None or (s["start"] is not None and s["start"] < combined["start"]):
-                combined["start"] = s["start"]
-            if combined["end"] is None or (s["end"] is not None and s["end"] > combined["end"]):
-                combined["end"] = s["end"]
+    # 绘制所有数据在一张图上
+    fig, axes = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
 
-        for flow, slots in sec_stats.items():
-            for slot, st in slots.items():
-                sec_slot = combined_sec_stats[flow][slot]
-                sec_slot["bytes"] += st["bytes"]
-                sec_slot["delays"].extend(st["delays"])
-                sec_slot["seqs"].update(st["seqs"])
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
 
-    print("[+] 生成汇总报告...")
-    summary(combined_flow_summary)
-    print("[+] 生成每秒图表...")
-    write_detail_csv(combined_flow_summary, combined_sec_stats)
-    print("[+] 完成!")
+    for idx, (label, flow_summary, sec_stats) in enumerate(all_data):
+        print(f"\n[{label}]")
+        print_summary(flow_summary)
+
+        flows = sorted(sec_stats.keys())
+        min_start = min(sorted(sec_stats[flow])[0] for flow in flows)
+
+        s_sum = flow_summary[flows[0]]
+        _, expected_total, _, _ = compute_loss(s_sum)
+
+        times, bws, delays, losses = [], [], [], []
+        for slot in sorted(sec_stats[flows[0]]):
+            st = sec_stats[flows[0]][slot]
+            pkt_bytes = st["bytes"]
+            dlys = st["delays"]
+            recv = len(dlys)
+
+            expected = expected_total // max(1, len(sec_stats[flows[0]]))
+            lost = max(0, expected - recv)
+            loss_r = (lost / expected) * 100 if expected > 0 else 0
+
+            times.append(slot - min_start)
+            bws.append(pkt_bytes * 8 / 1e6)
+            delays.append(sum(dlys) / len(dlys) if dlys else 0)
+            losses.append(loss_r)
+
+        color = colors[idx % len(colors)]
+
+        axes[0].plot(times, bws, marker='.', label=label, linewidth=1.5, color=color)
+        axes[1].plot(times, delays, marker='.', label=label, linewidth=1.5, color=color)
+        axes[2].plot(times, losses, marker='.', label=label, linewidth=1.5, color=color)
+
+    axes[0].set_ylabel('Bandwidth (Mbps)')
+    axes[0].set_title('Multicast MGEN Test - BW/Delay/Loss')
+    axes[0].legend(loc='upper right')
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].set_ylabel('Delay (ms)')
+    axes[1].legend(loc='upper right')
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].set_ylabel('Loss Rate (%)')
+    axes[2].set_xlabel('Time (sec)')
+    axes[2].legend(loc='upper right')
+    axes[2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig('mgen_mcast_result.png', dpi=150)
+    print(f"\n[+] Chart saved: mgen_mcast_result.png")
+    plt.close()
+    print("\n[+] All done!")
 
 if __name__ == "__main__":
     main()
-    plt.show()
