@@ -2,6 +2,8 @@ import subprocess
 import re
 
 import json
+from enum import Enum
+
 
 # 预编译正则表达式（避免每次调用函数都重新编译）
 _BW_PATTERN = re.compile(r'rate\s+(\d+)([KMG]?bit)')
@@ -21,6 +23,15 @@ _DELAY_UNITS = {
     's': 1e3,  # 秒 -> 毫秒
     '': 1  # 默认单位为毫秒
 }
+
+
+class WeightPref(Enum):
+    Default = 0
+    Latency = 1
+    LoadBalance = 2
+    LossRate = 3
+    SmartAlgorithm = 4
+    Bandwidth = 5
 
 
 def get_tc_stats_optimized(dev):
