@@ -29,6 +29,11 @@ sudo python netSim.py -t ring    # 环形网络拓扑（默认6节点，可通�
 sudo python netSim.py -t net     # 骨干网拓扑（默认层级3）
 sudo python netSim.py -t mcast   # 组播测试拓扑（层级化: 2-3-3-6）
 sudo python netSim.py net -l 3 -f # 层级3 + 全量23省接入节点
+
+# 组播专用拓扑（层级树状结构）
+sudo python netSim_mcast.py          # 默认层级化拓扑（2-3-3-6）
+sudo python netSim_mcast.py -l 4     # 自定义层级深度
+sudo python netSim_mcast.py -w 3     # 自定义每层节点宽度
 ```
 
 ### REST API 端点
@@ -38,6 +43,10 @@ sudo python netSim.py net -l 3 -f # 层级3 + 全量23省接入节点
 |------|------|
 | `GET /` | Web 可视化界面 |
 | `GET /topology/data` | 拓扑 JSON 数据（交换机列表、链路列表、主机列表） |
+| `GET /flows/active` | 活跃流列表 |
+| `GET /qos/rules` | QoS 规则列表 |
+| `POST /qos/rules` | 创建 QoS 规则 |
+| `DELETE /qos/rules/{rule_id}` | 删除 QoS 规则 |
 
 **OFCTL REST API (需要同时加载 ofctl_rest.py):**
 | 端点 | 说明 |
@@ -59,10 +68,8 @@ QoSController.py       # RYU SDN 控制器（单文件）
   │   ├── 最短路径计算（BFS/Dijkstra，详见 DSCP 路由策略）
   │   ├── ARP 代理处理
   │   └── 组播组管理（IGMP 加入/离开，UDP 组播流规则安装）
-  └── TopologyController # REST API 控制器
-      ├── GET /              → Web 可视化页面（topology_web.html）
-      ├── GET /topology/data → JSON 拓扑数据
-      └── GET /flows/active → 活跃流列表
+  ├── TopologyController # REST API 控制器（Web 可视化）
+  └── QoSRuleController   # REST API 控制器（QoS 规则管理）
 
 ofctl_rest.py           # RYU OFCTL REST API（支持 OF 1.0~1.5）
                         # 提供流表、端口、Meter、Group 等管理接口
@@ -71,24 +78,25 @@ ofctl_rest.py           # RYU OFCTL REST API（支持 OF 1.0~1.5）
 app/                    # RYU 应用示例集（含 ofctl/ 子模块）
                         # 主要用途：ofctl_rest.py 依赖 app/ofctl/ 提供底层 OpenFlow 操作
 
-netSim.py               # Mininet 拓扑生成器
-  ├── DualSwitchTopo     # 双交换机测试拓扑（2主机+2交换机）
-  ├── RingTopo           # 环形网络（n个交换机+主机，默认6节点）
-  ├── McastTestTopo      # 组播测试拓扑（层级化: 2-3-3-6）
-  └── ChinaBackboneTopo  # 骨干网分层拓扑
+netSim.py               # Mininet 拓扑生成器（单播/组播基础拓扑）
+netSim_mcast.py         # Mininet 组播拓扑生成器（层级化树状结构）
 
 client.py               # 强化学习组播树构建客户端（调用 gRPC 服务构建组播树）
 
-topology_web.html       # 浏览器端拓扑可视化（项目根目录，vis-network，每 2 秒轮询）
+topology_web.html       # 浏览器端拓扑可视化（vis-network，每 2 秒轮询）
 
-utils.py                # tc 统计解析工具（链路带宽/延迟/丢包）、OVS 交换机名称映射
+utils.py                # tc 统计解析工具、OVS 交换机名称映射、DSCP WeightPref 枚举
 
-send_igmp.py            # IGMPv2 测试工具（发送 Join/Leave/Query 报文）
-                        # 用法：python send_igmp.py [join|leave|query] [组播地址]
-                        # 示例：python send_igmp.py join 239.255.255.250
+testTool/               # 测试工具集
+  ├── send_igmp.py      # IGMPv2 测试工具（发送 Join/Leave/Query 报文）
+  ├── ditg_analyzer.py   # D-ITG 流量分析工具
+  ├── mgen_analyzer.py  # MGEN 流量分析工具
+  └── minibursty.py     # 突发流量测试工具
 
-multicast_pb2.py        # gRPC 组播服务 protobuf 生成的 stub
-multicast_pb2_grpc.py  # gRPC 组播服务生成的 RPC 存根（调用远端 RL_multicast_tree 服务）
+send_igmp.py            # IGMPv2 测试工具（项目根目录）
+
+multicast_pb2.py        # gRPC protobuf stub
+multicast_pb2_grpc.py  # gRPC RPC 存根
 ```
 
 ## DSCP 路由策略

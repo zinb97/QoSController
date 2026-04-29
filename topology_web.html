@@ -1109,11 +1109,15 @@
                 } else {
                     flowList.innerHTML = flows.map(f => {
                         const pathStr = f.path.join(' → ');
+                        const isQos = f.type === 'qos';
+                        const label = isQos && f.name
+                            ? `${f.name} (${f.src_ip} → ${f.dst_ip})`
+                            : `${f.src_ip} → ${f.dst_ip}`;
                         return `
                             <div class="switch-item" onclick="highlightFlowPath(${JSON.stringify(f.path_dpids).replace(/"/g, '&quot;')})" style="cursor: pointer;">
                                 <div class="switch-icon" style="background:#238636">→</div>
                                 <div class="switch-info">
-                                    <div class="switch-name">${f.src_ip} → ${f.dst_ip}</div>
+                                    <div class="switch-name">${label}</div>
                                     <div class="switch-dpid">${pathStr}</div>
                                 </div>
                             </div>
