@@ -2028,9 +2028,9 @@
                             'default': '→',
                             'bandwidth': '↑',
                             'latency': '⏱',
-                            'lossrate': '↓',
-                            'loadbalance': '↔',
-                            'smartalgorithm': '✦'
+                            'loss_rate': '↓',
+                            'load_balance': '↔',
+                            'smart_algorithm': '✦'
                         }[rule.guarantee] || '→';
                         return `
                             <div class="switch-item" onclick="openQosModal(${rule.id})" style="cursor: pointer;">
@@ -2103,7 +2103,7 @@
             const priority = parseInt(document.getElementById('qosPriority').value) || 100;
             const guarantee = document.getElementById('qosGuarantee').value;
 
-            if (!name || !srcIp || !dstIp) {
+            if (!srcIp || !dstIp) {
                 document.getElementById('qosError').textContent = 'Please fill in name, source IP, and destination IP';
                 document.getElementById('qosError').style.display = 'block';
                 return;
@@ -2579,9 +2579,9 @@
                             <option value="default">Default (默认规则)</option>
                             <option value="bandwidth">Bandwidth (带宽优先)</option>
                             <option value="latency">Latency (延迟优先)</option>
-                            <option value="lossrate">Loss Rate (丢包率优先)</option>
-                            <option value="loadbalance">Load Balance (负载均衡)</option>
-                            <option value="smartalgorithm">Smart Algorithm (综合考虑)</option>
+                            <option value="loss_rate">Loss Rate (丢包率优先)</option>
+                            <option value="load_balance">Load Balance (负载均衡)</option>
+                            <option value="smart_algorithm">Smart Algorithm (综合考虑)</option>
                         </select>
                     </div>
                 </div>

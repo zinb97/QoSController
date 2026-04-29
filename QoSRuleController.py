@@ -23,7 +23,7 @@ class QoSRuleController(ControllerBase):
             rule_data['id'] = rule_id
             # 将 path DPIDs 转换为名称
             if 'path' in rule_data:
-                rule_data['path_names'] = [self.switch_app.switch_name.get(f'{p:016x}', f'{p}') for p in rule_data['path']]
+                rule_data['path_names'] = [self.switch_app.sw_name(p) for p in rule_data['path']]
             rules.append(rule_data)
         body = json.dumps(rules, ensure_ascii=False).encode('utf-8')
         return Response(content_type='application/json; charset=UTF-8', body=body)
@@ -35,7 +35,7 @@ class QoSRuleController(ControllerBase):
             data = json.loads(req.body.decode('utf-8'))
 
             # 验证必填字段
-            required_fields = ['name', 'src_ip', 'dst_ip']
+            required_fields = ['src_ip', 'dst_ip']
             for field in required_fields:
                 if not data.get(field):
                     error_msg = json.dumps({'success': False, 'error': f'Missing required field: {field}'}, ensure_ascii=False).encode('utf-8')
@@ -49,7 +49,7 @@ class QoSRuleController(ControllerBase):
 
             # 验证 guarantee
             guarantee = data.get('guarantee', 'default')
-            valid_guarantees = ('default', 'bandwidth', 'latency', 'lossrate', 'loadbalance', 'samplealgorithm')
+            valid_guarantees = ('default', 'bandwidth', 'latency', 'loss_rate', 'load_balance', 'smart_algorithm')
             if guarantee not in valid_guarantees:
                 error_msg = json.dumps({'success': False, 'error': f'Invalid guarantee. Must be one of: {valid_guarantees}'}, ensure_ascii=False).encode('utf-8')
                 return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
@@ -81,9 +81,9 @@ class QoSRuleController(ControllerBase):
                 'default': None,
                 'bandwidth': WeightPref.Bandwidth,
                 'latency': WeightPref.Latency,
-                'lossrate': WeightPref.LossRate,
-                'loadbalance': WeightPref.LoadBalance,
-                'samplealgorithm': WeightPref.SmartAlgorithm
+                'loss_rate': WeightPref.LossRate,
+                'load_balance': WeightPref.LoadBalance,
+                'smart_algorithm': WeightPref.SmartAlgorithm
             }
             preference = pref_map.get(guarantee)
 
@@ -107,11 +107,11 @@ class QoSRuleController(ControllerBase):
 
             # 生成规则 ID
             rule_id = self.switch_app.qos_rule_counter + 1
-            self.switch_app.qos_rule_counter = rule_id
+            self.switch_app.qos_rule_counter += 1
 
             # 创建规则
             rule = {
-                'name': data['name'],
+                'name': data.get('name') if data.get('name') else f'qos_{rule_id}',
                 'src_ip': src_ip,
                 'dst_ip': dst_ip,
                 'protocol': protocol,
@@ -131,7 +131,7 @@ class QoSRuleController(ControllerBase):
 
             # 安装流表
             if rule['enabled']:
-                self.switch_app._install_qos_flow(rule)
+                self.switch_app.install_qos_flow(rule)
 
             # 将 QoS 规则添加到 active_flows
             self.switch_app.active_flows[f'qos_{rule_id}'] = {
@@ -172,7 +172,7 @@ class QoSRuleController(ControllerBase):
             return Response(content_type='application/json; charset=UTF-8', body=body)
         except ValueError:
             error_msg = json.dumps({'success': False, 'error': 'Invalid rule ID'}, ensure_ascii=False).encode('utf-8')
-            return Response(content_type='application/json; charset=UTF-8', body=body, status=400)
+            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
 
     @route('qos', '/qos/rules/{rule_id}', methods=['PUT', 'POST'])
     def update_qos_rule(self, req, rule_id):
@@ -187,7 +187,7 @@ class QoSRuleController(ControllerBase):
             rule = self.switch_app.qos_rules[rule_id]
 
             # 删除旧流表
-            self.switch_app._delete_qos_flow(rule)
+            self.switch_app.delete_qos_flow(rule)
 
             # 更新字段
             if 'name' in data:
@@ -223,9 +223,9 @@ class QoSRuleController(ControllerBase):
                     'default': None,
                     'bandwidth': WeightPref.Bandwidth,
                     'latency': WeightPref.Latency,
-                    'lossrate': WeightPref.LossRate,
-                    'loadbalance': WeightPref.LoadBalance,
-                    'samplealgorithm': WeightPref.SmartAlgorithm
+                    'loss_rate': WeightPref.LossRate,
+                    'load_balance': WeightPref.LoadBalance,
+                    'smart_algorithm': WeightPref.SmartAlgorithm
                 }
                 preference = pref_map.get(guarantee)
                 path = self.switch_app.get_shortest_path(src_dpid, dst_dpid, preference)
@@ -257,7 +257,7 @@ class QoSRuleController(ControllerBase):
 
             # 安装新流表
             if rule['enabled']:
-                self.switch_app._install_qos_flow(rule)
+                self.switch_app.install_qos_flow(rule)
 
             self.switch_app.logger.info(f"[QoS] Updated rule: {rule['name']} (id={rule_id})")
 
@@ -287,7 +287,7 @@ class QoSRuleController(ControllerBase):
             rule = self.switch_app.qos_rules[rule_id]
 
             # 删除流表
-            self.switch_app._delete_qos_flow(rule)
+            self.switch_app.delete_qos_flow(rule)
 
             # 从 active_flows 中删除
             flow_key = f'qos_{rule_id}'
