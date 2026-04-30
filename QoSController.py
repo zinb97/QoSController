@@ -91,6 +91,13 @@ class QoSController(app_manager.RyuApp):
 
         self.switch_name = utils.get_switch_name()
 
+        # 链路抖动去抖动机制
+        self._link_delete_pending = {}  # {(src_dpid, src_port, dst_dpid, dst_port): pending_timer}
+        self._link_delete_delay = 5     # 延迟秒数再删除链路
+
+        # 链路事件处理开关
+        self.link_event_enabled = True  # 默认开启
+
         # 抑制 WSGI HTTP 请求日志
         # 原始实现使用 LoggingWrapper 写日志到 LOG.info
         _original_serve_forever = hub.WSGIServer.serve_forever
@@ -720,6 +727,19 @@ class QoSController(app_manager.RyuApp):
 
     @set_ev_cls(event.EventLinkAdd)
     def link_add_handler(self, ev):
+        if not self.link_event_enabled:
+            self.logger.debug(f"[Link Event] Link add ignored (disabled): {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> {self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
+            return
+
+        link_key = (ev.link.src.dpid, ev.link.src.port_no, ev.link.dst.dpid, ev.link.dst.port_no)
+
+        # 如果链路之前触发过 pending delete，取消删除
+        if link_key in self._link_delete_pending:
+            timer = self._link_delete_pending.pop(link_key)
+            self.logger.info(f"链路恢复，取消删除: {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> "
+                            f"{self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
+            return
+
         self.logger.info(f"新增链路: {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> "
                          f"{self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
         with self._lock:
@@ -742,16 +762,37 @@ class QoSController(app_manager.RyuApp):
             # 每个组播组之间间隔 5 秒
             # time.sleep(5)
 
-    @set_ev_cls(event.EventLinkDelete)
-    def link_delete_handler(self, ev):
-        self.logger.info(f"删除链路: {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> "
-                         f"{self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
+    def _execute_link_delete(self, src_dpid, src_port, dst_dpid, dst_port):
+        """真正执行链路删除"""
+        self.logger.info(f"删除链路: {self.sw_name(src_dpid)}:{src_port} <-> {self.sw_name(dst_dpid)}:{dst_port}")
         with self._lock:
             self.update_topology()
-        # 重新计算受影响的流
         self._recalculate_affected_flows()
-        # 重新计算受影响的组播流
-        self._recalculate_affected_multicast_flows(deleted_link=(ev.link.src.dpid, ev.link.dst.dpid))
+        self._recalculate_affected_multicast_flows(deleted_link=(src_dpid, dst_dpid))
+
+    @set_ev_cls(event.EventLinkDelete)
+    def link_delete_handler(self, ev):
+        if not self.link_event_enabled:
+            self.logger.debug(f"[Link Event] Link delete ignored (disabled): {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> {self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
+            return
+
+        link_key = (ev.link.src.dpid, ev.link.src.port_no, ev.link.dst.dpid, ev.link.dst.port_no)
+
+        # 如果已经在 pending 状态，不再重复处理
+        if link_key in self._link_delete_pending:
+            return
+
+        self.logger.warning(f"链路可能断开，等待确认: {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> "
+                           f"{self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
+
+        # 延迟删除，给链路恢复留出时间
+        def delayed_delete():
+            if link_key in self._link_delete_pending:
+                del self._link_delete_pending[link_key]
+                self._execute_link_delete(ev.link.src.dpid, ev.link.src.port_no,
+                                         ev.link.dst.dpid, ev.link.dst.port_no)
+
+        self._link_delete_pending[link_key] = hub.spawn_after(self._link_delete_delay, delayed_delete)
 
     @set_ev_cls(event.EventHostAdd)
     def host_add_handler(self, ev):
@@ -1015,8 +1056,14 @@ class QoSController(app_manager.RyuApp):
         dpid = datapath.id
         src_ip = ipv4_pkt.src
         src_mac = eth.src
-        multicast_addr = igmp_pkt.address
         msgtype = igmp_pkt.msgtype
+
+        # 跳过 IGMPv3 报文 (msgtype 0x22)
+        if msgtype == 0x22:
+            self.logger.info(f"[IGMP] IGMPv3 Report ignored, SW:{dpid}")
+            return
+
+        multicast_addr = igmp_pkt.address
 
         igmp_type_names = {
             0x11: "Membership Query",
@@ -1715,6 +1762,23 @@ class TopologyController(ControllerBase):
     def get_topo_data(self, req):
         body = json.dumps(self.switch_app.topology_data, ensure_ascii=False).encode('utf-8')
         return Response(content_type='application/json; charset=UTF-8', body=body)
+
+    @route('topology', '/link_event', methods=['GET', 'POST'])
+    def set_link_event(self, req):
+        """获取或设置链路事件处理开关"""
+        if req.method == 'GET':
+            body = json.dumps({'enabled': self.switch_app.link_event_enabled}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
+        else:
+            try:
+                body = json.loads(req.body.decode('utf-8'))
+                enabled = body.get('enabled', True)
+                self.switch_app.link_event_enabled = enabled
+                response = json.dumps({'success': True, 'enabled': enabled}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=response)
+            except Exception as e:
+                response = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=response)
 
     @route('topology', '/flows/active', methods=['GET'])
     def get_active_flows(self, req):

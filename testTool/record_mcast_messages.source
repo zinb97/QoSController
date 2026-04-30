@@ -1,0 +1,5 @@
+h1 nohup chrt -f 50 mgen output mcast_recv_h1.log event "0.0 JOIN 239.5.5.5" event "0.0 LISTEN UDP 5000" > /dev/null 2>&1 &
+h2 nohup chrt -f 50 mgen output mcast_recv_h2.log event "0.0 JOIN 239.5.5.5" event "0.0 LISTEN UDP 5000" > /dev/null 2>&1 &
+h3 nohup chrt -f 50 mgen output mcast_recv_h3.log event "0.0 JOIN 239.5.5.5" event "0.0 LISTEN UDP 5000" > /dev/null 2>&1 &
+h4 nohup chrt -f 50 mgen output mcast_recv_h4.log event "0.0 JOIN 239.5.5.5" event "0.0 LISTEN UDP 5000" > /dev/null 2>&1 &
+h6 nohup chrt -f 50 mgen output mcast_recv_h6.log event "0.0 JOIN 239.5.5.5" event "0.0 LISTEN UDP 5000" > /dev/null 2>&1 &
