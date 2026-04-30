@@ -78,7 +78,7 @@ class QoSRuleController(ControllerBase):
 
             # 根据 guarantee 转换为 WeightPref 枚举用于路由计算
             pref_map = {
-                'default': None,
+                'default': WeightPref.Default,
                 'bandwidth': WeightPref.Bandwidth,
                 'latency': WeightPref.Latency,
                 'loss_rate': WeightPref.LossRate,
@@ -94,16 +94,10 @@ class QoSRuleController(ControllerBase):
                 return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
 
             # 获取路径上的交换机信息
-            src_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(src_ip), {})
-            dst_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(dst_ip), {})
+            src_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(src_ip))
+            dst_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(dst_ip))
 
-            path_switches = self.switch_app.get_path_switches(
-                path,
-                src_host.get('dpid', path[0]),
-                src_host.get('port', 1),
-                dst_host.get('dpid', path[-1]),
-                dst_host.get('port', 1)
-            )
+            path_switches = self.switch_app.get_path_switches(path, src_host.get('dpid'), src_host.get('port'), dst_host.get('dpid'), dst_host.get('port'))
 
             # 生成规则 ID
             rule_id = self.switch_app.qos_rule_counter + 1
@@ -111,7 +105,8 @@ class QoSRuleController(ControllerBase):
 
             # 创建规则
             rule = {
-                'name': data.get('name') if data.get('name') else f'qos_{rule_id}',
+                'name': data.get('name') if data.get('name') else f'qos {rule_id}',
+                'id': rule_id,
                 'src_ip': src_ip,
                 'dst_ip': dst_ip,
                 'protocol': protocol,
@@ -120,26 +115,21 @@ class QoSRuleController(ControllerBase):
                 'dscp': dscp,
                 'priority': priority,
                 'guarantee': guarantee,
-                'enabled': data.get('enabled', True),
-                'src_dpid': src_dpid,
-                'dst_dpid': dst_dpid,
                 'path': path,
                 'path_switches': path_switches
             }
 
             self.switch_app.qos_rules[rule_id] = rule
-
-            # 安装流表
-            if rule['enabled']:
-                self.switch_app.install_qos_flow(rule)
+            self.switch_app.install_qos_flow(rule)
 
             # 将 QoS 规则添加到 active_flows
-            self.switch_app.active_flows[f'qos_{rule_id}'] = {
+            self.switch_app.active_flows[rule_id] = {
                 'type': 'qos',
                 'path': path,
                 'path_switches': path_switches,
-                'rule_id': rule_id,
-                'rule': rule
+                'rule': rule,
+                'src_host': src_host,
+                'dst_host': dst_host,
             }
 
             self.switch_app.logger.info(f"[QoS] Created rule: {rule['name']} ({src_ip} -> {dst_ip})")
@@ -218,47 +208,40 @@ class QoSRuleController(ControllerBase):
             src_dpid = self.switch_app.host_ip_to_dpid.get(src_ip)
             dst_dpid = self.switch_app.host_ip_to_dpid.get(dst_ip)
 
-            if src_dpid and dst_dpid:
-                pref_map = {
-                    'default': None,
-                    'bandwidth': WeightPref.Bandwidth,
-                    'latency': WeightPref.Latency,
-                    'loss_rate': WeightPref.LossRate,
-                    'load_balance': WeightPref.LoadBalance,
-                    'smart_algorithm': WeightPref.SmartAlgorithm
+            if not src_dpid or not dst_dpid:
+                raise
+
+            pref_map = {
+                'default': WeightPref.Default,
+                'bandwidth': WeightPref.Bandwidth,
+                'latency': WeightPref.Latency,
+                'loss_rate': WeightPref.LossRate,
+                'load_balance': WeightPref.LoadBalance,
+                'smart_algorithm': WeightPref.SmartAlgorithm
+            }
+            preference = pref_map.get(guarantee)
+            path = self.switch_app.get_shortest_path(src_dpid, dst_dpid, preference)
+            if not path or len(path) <= 2:
+                raise
+
+            src_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(src_ip))
+            dst_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(dst_ip))
+            path_switches = self.switch_app.get_path_switches(path, src_host.get('dpid'), src_host.get('port'), dst_host.get('dpid'), dst_host.get('port'))
+
+            rule['path'] = path
+            rule['path_switches'] = path_switches
+
+            # 更新 active_flows 中的记录
+            if rule_id in self.switch_app.active_flows:
+                self.switch_app.active_flows[rule_id] = {
+                    'type': 'qos',
+                    'path': path,
+                    'path_switches': path_switches,
+                    'rule': rule,
+                    'src_host': src_host,
+                    'dst_host': dst_host,
                 }
-                preference = pref_map.get(guarantee)
-                path = self.switch_app.get_shortest_path(src_dpid, dst_dpid, preference)
-                if path and len(path) >= 2:
-                    rule['path'] = path
-                    rule['src_dpid'] = src_dpid
-                    rule['dst_dpid'] = dst_dpid
-                    src_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(src_ip), {})
-                    dst_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(dst_ip), {})
-                    path_switches = self.switch_app.get_path_switches(
-                        path,
-                        src_host.get('dpid', path[0]),
-                        src_host.get('port', 1),
-                        dst_host.get('dpid', path[-1]),
-                        dst_host.get('port', 1)
-                    )
-                    rule['path_switches'] = path_switches
-
-                    # 更新 active_flows 中的记录
-                    flow_key = f'qos_{rule_id}'
-                    if flow_key in self.switch_app.active_flows:
-                        self.switch_app.active_flows[flow_key] = {
-                            'type': 'qos',
-                            'path': path,
-                            'path_switches': path_switches,
-                            'rule_id': rule_id,
-                            'rule': rule
-                        }
-
-            # 安装新流表
-            if rule['enabled']:
-                self.switch_app.install_qos_flow(rule)
-
+            self.switch_app.install_qos_flow(rule)
             self.switch_app.logger.info(f"[QoS] Updated rule: {rule['name']} (id={rule_id})")
 
             rule_data = rule.copy()
@@ -290,7 +273,7 @@ class QoSRuleController(ControllerBase):
             self.switch_app.delete_qos_flow(rule)
 
             # 从 active_flows 中删除
-            flow_key = f'qos_{rule_id}'
+            flow_key = rule['id']
             if flow_key in self.switch_app.active_flows:
                 del self.switch_app.active_flows[flow_key]
 
