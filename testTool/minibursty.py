@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import argparse
 import os
 import random
@@ -23,9 +24,9 @@ def log(msg):
 # ==================== 主机信息获取 ====================
 def extract_mininet_hosts():
     """从 ps 命令输出中提取 mininet 主机进程"""
-    result = subprocess.run(['ps', '-eo', 'pid,cmd'], capture_output=True, text=True, check=True)
+    result = subprocess.run(['ps', '-eo', 'pid,cmd'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     host_pid_map = {}
-    for line in result.stdout.splitlines():
+    for line in result.stdout.decode('utf-8').splitlines():
         if 'mininet:' in line and 'grep' not in line:
             parts = line.split()
             pid = parts[0]
@@ -176,7 +177,7 @@ def run_batch_in_namespaces(pid_list, port, duration, bandwidth, threads, size):
         ]
         log(f"[Batch] 启动 PID={target_pid}")
         try:
-            subprocess.run(cmd, stdout=None, stderr=None, check=True)
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             log(f"[Batch] 完成 PID={target_pid}")
         except Exception as e:
             log(f"[Batch] 失败 PID={target_pid}: {e}")

@@ -164,28 +164,39 @@ def plot_stats(flow_summary, sec_stats, output_prefix):
         delay_data[flow] = delays
         loss_data[flow] = losses
 
+    # 计算平均值
+    avg_bw = sum(bws) / len(bws) if bws else 0
+    avg_delay = sum(delays) / len(delays) if delays else 0
+    avg_loss = sum(losses) / len(losses) if losses else 0
+
     fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
 
     ax_bw = axes[0]
     for flow in flows:
         ax_bw.plot(time_data[flow], bw_data[flow], marker='.', label=f'Flow {flow}', linewidth=1.5)
+    ax_bw.axhline(y=avg_bw, color='red', linestyle='--', linewidth=1.5, label=f'Avg: {avg_bw:.2f} Mbps')
     ax_bw.set_ylabel('Bandwidth (Mbps)')
     ax_bw.set_title(f'Multicast MGEN Test - {output_prefix}')
+    ax_bw.set_ylim(0, 260)
     ax_bw.legend(loc='upper right')
     ax_bw.grid(True, alpha=0.3)
 
     ax_delay = axes[1]
     for flow in flows:
         ax_delay.plot(time_data[flow], delay_data[flow], marker='.', label=f'Flow {flow}', linewidth=1.5)
+    ax_delay.axhline(y=avg_delay, color='red', linestyle='--', linewidth=1.5, label=f'Avg: {avg_delay:.2f} ms')
     ax_delay.set_ylabel('Delay (ms)')
+    ax_delay.set_ylim(0, 100)
     ax_delay.legend(loc='upper right')
     ax_delay.grid(True, alpha=0.3)
 
     ax_loss = axes[2]
     for flow in flows:
         ax_loss.plot(time_data[flow], loss_data[flow], marker='.', label=f'Flow {flow}', linewidth=1.5)
+    ax_loss.axhline(y=avg_loss, color='red', linestyle='--', linewidth=1.5, label=f'Avg: {avg_loss:.2f}%')
     ax_loss.set_ylabel('Loss Rate (%)')
     ax_loss.set_xlabel('Time (sec)')
+    ax_loss.set_ylim(0, 100)
     ax_loss.legend(loc='upper right')
     ax_loss.grid(True, alpha=0.3)
 
@@ -273,17 +284,46 @@ def main():
         axes[1].plot(times, delays, marker='.', label=label, linewidth=1.5, color=color)
         axes[2].plot(times, losses, marker='.', label=label, linewidth=1.5, color=color)
 
+    # 计算总平均值
+    all_bws = []
+    all_delays = []
+    all_losses = []
+    for label, flow_summary, sec_stats in all_data:
+        flows = sorted(sec_stats.keys())
+        s_sum = flow_summary[flows[0]]
+        _, expected_total, _, _ = compute_loss(s_sum)
+        for slot in sorted(sec_stats[flows[0]]):
+            st = sec_stats[flows[0]][slot]
+            all_bws.append(st["bytes"] * 8 / 1e6)
+            all_delays.append(sum(st["delays"]) / len(st["delays"]) if st["delays"] else 0)
+            recv = len(st["delays"])
+            expected = expected_total // max(1, len(sec_stats[flows[0]]))
+            lost = max(0, expected - recv)
+            loss_r = (lost / expected) * 100 if expected > 0 else 0
+            all_losses.append(loss_r)
+
+    avg_bw = sum(all_bws) / len(all_bws) if all_bws else 0
+    avg_delay = sum(all_delays) / len(all_delays) if all_delays else 0
+    avg_loss = sum(all_losses) / len(all_losses) if all_losses else 0
+
+    axes[0].axhline(y=avg_bw, color='red', linestyle='--', linewidth=2, label=f'Avg: {avg_bw:.2f} Mbps')
+    axes[1].axhline(y=avg_delay, color='red', linestyle='--', linewidth=2, label=f'Avg: {avg_delay:.2f} ms')
+    axes[2].axhline(y=avg_loss, color='red', linestyle='--', linewidth=2, label=f'Avg: {avg_loss:.2f}%')
+
     axes[0].set_ylabel('Bandwidth (Mbps)')
     axes[0].set_title('Multicast MGEN Test - BW/Delay/Loss')
+    axes[0].set_ylim(0, 260)
     axes[0].legend(loc='upper right')
     axes[0].grid(True, alpha=0.3)
 
     axes[1].set_ylabel('Delay (ms)')
+    axes[1].set_ylim(0, 100)
     axes[1].legend(loc='upper right')
     axes[1].grid(True, alpha=0.3)
 
     axes[2].set_ylabel('Loss Rate (%)')
     axes[2].set_xlabel('Time (sec)')
+    axes[2].set_ylim(0, 100)
     axes[2].legend(loc='upper right')
     axes[2].grid(True, alpha=0.3)
 
