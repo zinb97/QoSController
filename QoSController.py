@@ -86,6 +86,11 @@ class QoSController(app_manager.RyuApp):
         # 端口统计（用于计算链路负载）
         self.port_stats = {}            # {dpid: {port_no: {'rx_bytes': ..., 'tx_bytes': ..., 'timestamp': ...}}}
         self.port_stats_prev = {}       # {dpid: {port_no: {'rx_bytes': ..., 'tx_bytes': ..., 'timestamp': ...}}}
+        # 组播组负载统计: {multicast_addr: {'load': float(Mbps), 'timestamp': float}}
+        self.multicast_load = {}
+        # 流规则统计: {dpid: {match_key: {'byte_count': ..., 'packet_count': ..., 'timestamp': ...}}}
+        self.flow_stats = {}
+        self.flow_stats_prev = {}
 
         self._lock = threading.Lock()
 
@@ -116,6 +121,7 @@ class QoSController(app_manager.RyuApp):
 
         self._topo_thread = hub.spawn(self._topology_loop)
         self._stats_thread = hub.spawn(self._stats_loop)
+        self._mcast_load_thread = hub.spawn(self._multicast_load_loop)
 
     def _topology_loop(self):
         while True:
@@ -135,6 +141,19 @@ class QoSController(app_manager.RyuApp):
             except Exception as e:
                 self.logger.warning(f"Port stats request failed: {e}")
             hub.sleep(2)
+
+    def _multicast_load_loop(self):
+        """定期请求组播组源交换机的流表统计，计算组播组负载"""
+        while True:
+            try:
+                with self._lock:
+                    for multicast_addr, flow_info in self.multicast_active_flows.items():
+                        src_dpid = flow_info.get('source_dpid')
+                        if src_dpid and src_dpid in self.datapaths:
+                            self._request_flow_stats(src_dpid)
+            except Exception as e:
+                self.logger.warning(f"Multicast load stats request failed: {e}")
+            hub.sleep(10)
 
     def _recalculate_affected_flows(self):
         """重新计算受拓扑变化影响的流"""
@@ -838,6 +857,50 @@ class QoSController(app_manager.RyuApp):
                     self.port_stats[dpid][port_no]['total_bps'] = round(rx_bps + tx_bps, 2)
 
         self.port_stats_prev[dpid] = self.port_stats[dpid]
+
+    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
+    def _flow_stats_reply_handler(self, ev):
+        """处理流表统计应答，计算组播组负载"""
+        msg = ev.msg
+        dpid = msg.datapath.id
+        now = time.time()
+
+        if dpid not in self.flow_stats:
+            self.flow_stats[dpid] = {}
+
+        for stat in msg.body:
+            # 生成 match 的唯一标识
+            match = stat.match
+            ipv4_src = match.get('ipv4_src')
+            ipv4_dst = match.get('ipv4_dst')
+            if not ipv4_src or not ipv4_dst:
+                continue
+            flow_key = f"{ipv4_src}:{ipv4_dst}"
+
+            self.flow_stats[dpid][flow_key] = {
+                'byte_count': stat.byte_count,
+                'packet_count': stat.packet_count,
+                'timestamp': now
+            }
+
+            # 计算与上次的差值和负载
+            if dpid in self.flow_stats_prev and flow_key in self.flow_stats_prev[dpid]:
+                prev = self.flow_stats_prev[dpid][flow_key]
+                time_delta = now - prev['timestamp']
+                if time_delta > 0:
+                    byte_delta = stat.byte_count - prev['byte_count']
+                    load_mbps = (byte_delta * 8) / time_delta / 1_000_000
+
+                    # 查找对应的组播组并记录负载
+                    for multicast_addr, flow_info in self.multicast_active_flows.items():
+                        if flow_info.get('source_ip') == ipv4_src:
+                            self.multicast_load[multicast_addr] = {
+                                'load': round(load_mbps, 2),
+                                'timestamp': now
+                            }
+                            self.logger.debug(f"[Multicast Load] Group {multicast_addr}: {round(load_mbps, 2)} Mbps (flow {flow_key})")
+
+        self.flow_stats_prev[dpid] = self.flow_stats[dpid]
 
     # ==================== 流表过期处理 ====================
     @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
@@ -1755,6 +1818,17 @@ class QoSController(app_manager.RyuApp):
             parser = datapath.ofproto_parser
             req = parser.OFPPortStatsRequest(datapath, port_no=ofproto.OFPP_ANY)
             datapath.send_msg(req)
+
+    def _request_flow_stats(self, dpid):
+        """向指定交换机发送流表统计请求"""
+        if dpid not in self.datapaths:
+            return
+        datapath = self.datapaths[dpid]
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        match = parser.OFPMatch(eth_type=0x0800)  # 匹配所有 IPv4 流量
+        req = parser.OFPFlowStatsRequest(datapath, ofproto.OFPTT_ALL, ofproto.OFPP_ANY, ofproto.OFPG_ANY, 0, 0, match)
+        datapath.send_msg(req)
 
     def sw_name(self, dpid):
         return f'{self.switch_name.get(f"{dpid:016x}", f"{dpid}")}'
