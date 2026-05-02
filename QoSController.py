@@ -91,6 +91,10 @@ class QoSController(app_manager.RyuApp):
         # 流规则统计: {dpid: {match_key: {'byte_count': ..., 'packet_count': ..., 'timestamp': ...}}}
         self.flow_stats = {}
         self.flow_stats_prev = {}
+        # 链路连续高负载计数: {(src_dpid, dst_dpid): 连续高负载次数}
+        self.link_high_load_count = {}
+        # 组播组高负载标记: {multicast_addr: True/False}
+        self.multicast_high_load = {}
 
         self._lock = threading.Lock()
 
@@ -122,6 +126,7 @@ class QoSController(app_manager.RyuApp):
         self._topo_thread = hub.spawn(self._topology_loop)
         self._stats_thread = hub.spawn(self._stats_loop)
         self._mcast_load_thread = hub.spawn(self._multicast_load_loop)
+        self._link_load_thread = hub.spawn(self._link_load_loop)
 
     def _topology_loop(self):
         while True:
@@ -149,11 +154,54 @@ class QoSController(app_manager.RyuApp):
                 with self._lock:
                     for multicast_addr, flow_info in self.multicast_active_flows.items():
                         src_dpid = flow_info.get('source_dpid')
-                        if src_dpid and src_dpid in self.datapaths:
-                            self._request_flow_stats(src_dpid)
+                        src_ip = flow_info.get('source_ip')
+                        if src_dpid and src_dpid in self.datapaths and src_ip:
+                            self._request_flow_stats(src_dpid, multicast_addr, src_ip)
             except Exception as e:
                 self.logger.warning(f"Multicast load stats request failed: {e}")
-            hub.sleep(10)
+            hub.sleep(5)
+
+    def _link_load_loop(self):
+        """定期检查链路负载，如果某条链路连续三次超过80%负载且在组播路径中，标记组播组为高负载"""
+        while True:
+            try:
+                with self._lock:
+                    self._check_link_load()
+            except Exception as e:
+                self.logger.warning(f"Link load check failed: {e}")
+            hub.sleep(5)
+
+    def _check_link_load(self):
+        """检查所有链路负载，更新高负载计数和组播组标记"""
+        high_threshold = 0.8  # 80% 阈值
+
+        for src_dpid, dst_dpid, attrs in self.graph.edges(data=True):
+            bw = attrs.get('bw', 0)
+            total_bps = attrs.get('total_bps', 0)
+            load_ratio = total_bps / bw if bw > 0 else 0
+
+            link_key = (src_dpid, dst_dpid)
+
+            if load_ratio > high_threshold:
+                # 增加连续高负载计数
+                self.link_high_load_count[link_key] = self.link_high_load_count.get(link_key, 0) + 1
+                self.logger.debug(f"[Link Load] {self.sw_name(src_dpid)}->{self.sw_name(dst_dpid)} load={load_ratio:.2%}, count={self.link_high_load_count[link_key]}")
+            else:
+                # 负载恢复正常，重置计数
+                self.link_high_load_count[link_key] = 0
+
+            # 如果连续三次超过80%且该链路在组播路径中，标记组播组为高负载
+            if self.link_high_load_count.get(link_key, 0) >= 3:
+                self._mark_multicast_high_load(src_dpid, dst_dpid)
+
+    def _mark_multicast_high_load(self, src_dpid, dst_dpid):
+        """如果链路在组播路径中，标记对应组播组为高负载"""
+        for multicast_addr, flow_info in self.multicast_active_flows.items():
+            path = flow_info.get('path', [])
+            # 检查 (src_dpid, dst_dpid) 或 (dst_dpid, src_dpid) 是否在路径中
+            if (src_dpid, dst_dpid) in path or (dst_dpid, src_dpid) in path:
+                self.multicast_high_load[multicast_addr] = True
+                self.logger.info(f"[Multicast High Load] Group {multicast_addr} marked as high load (link {self.sw_name(src_dpid)}->{self.sw_name(dst_dpid)})")
 
     def _recalculate_affected_flows(self):
         """重新计算受拓扑变化影响的流"""
@@ -865,8 +913,7 @@ class QoSController(app_manager.RyuApp):
         dpid = msg.datapath.id
         now = time.time()
 
-        if dpid not in self.flow_stats:
-            self.flow_stats[dpid] = {}
+        self.flow_stats[dpid] = {}
 
         for stat in msg.body:
             # 生成 match 的唯一标识
@@ -1819,15 +1866,33 @@ class QoSController(app_manager.RyuApp):
             req = parser.OFPPortStatsRequest(datapath, port_no=ofproto.OFPP_ANY)
             datapath.send_msg(req)
 
-    def _request_flow_stats(self, dpid):
+    def _request_flow_stats(self, dpid, multicast_addr=None, src_ip=None):
         """向指定交换机发送流表统计请求"""
         if dpid not in self.datapaths:
             return
         datapath = self.datapaths[dpid]
-        ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        match = parser.OFPMatch(eth_type=0x0800)  # 匹配所有 IPv4 流量
-        req = parser.OFPFlowStatsRequest(datapath, ofproto.OFPTT_ALL, ofproto.OFPP_ANY, ofproto.OFPG_ANY, 0, 0, match)
+
+        # 如果提供了源IP和组播地址，构建精确的匹配条件
+        if src_ip and multicast_addr:
+            match = parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src=src_ip,
+                ipv4_dst=multicast_addr
+            )
+        else:
+            match = parser.OFPMatch(eth_type=0x0800)
+
+        ofproto = datapath.ofproto
+        req = parser.OFPFlowStatsRequest(
+            datapath,
+            table_id=ofproto.OFPTT_ALL,
+            out_port=ofproto.OFPP_ANY,
+            out_group=ofproto.OFPG_ANY,
+            cookie=0,
+            cookie_mask=0,
+            match=match
+        )
         datapath.send_msg(req)
 
     def sw_name(self, dpid):
