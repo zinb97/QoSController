@@ -1343,9 +1343,17 @@ class QoSController(app_manager.RyuApp):
                         if route_matrix[i, j] == 1:
                             path_list.append((self.adj_matrix_nodes[i], self.adj_matrix_nodes[j]))
 
+                # 获取源主机与源交换机相连的端口号
+                src_switch_in_port = None
+                for mac, host_info in self.hosts.items():
+                    if host_info.get('ip') == src_ip and host_info.get('dpid') == src_switch_dpid:
+                        src_switch_in_port = host_info.get('port')
+                        break
+
                 self.multicast_active_flows[multicast_addr] = {
                     'source_ip': src_ip,
                     'source_dpid': src_switch_dpid,
+                    'source_in_port': src_switch_in_port,
                     'route_matrix': route_matrix,
                     'member_ips': member_ips,
                     'path': path_list,
