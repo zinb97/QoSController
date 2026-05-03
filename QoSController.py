@@ -195,13 +195,36 @@ class QoSController(app_manager.RyuApp):
                 self._mark_multicast_high_load(src_dpid, dst_dpid)
 
     def _mark_multicast_high_load(self, src_dpid, dst_dpid):
-        """如果链路在组播路径中，标记对应组播组为高负载"""
+        """如果链路在组播路径中，标记对应组播组为高负载
+        但如果组播组的负载占链路带宽的比例超过阈值（0.8），则不标记为高负载
+        """
+        high_threshold = 0.8
+
         for multicast_addr, flow_info in self.multicast_active_flows.items():
             path = flow_info.get('path', [])
             # 检查 (src_dpid, dst_dpid) 或 (dst_dpid, src_dpid) 是否在路径中
             if (src_dpid, dst_dpid) in path or (dst_dpid, src_dpid) in path:
+                # 获取组播组的负载和链路带宽
+                mcast_load = self.multicast_load.get(multicast_addr, {}).get('load', 0)
+                # 获取链路带宽
+                if self.graph.has_edge(src_dpid, dst_dpid):
+                    link_bw = self.graph[src_dpid][dst_dpid].get('bw', 0)
+                elif self.graph.has_edge(dst_dpid, src_dpid):
+                    link_bw = self.graph[dst_dpid][src_dpid].get('bw', 0)
+                else:
+                    link_bw = 0
+
+                if link_bw > 0:
+                    load_ratio = mcast_load / link_bw
+                    if load_ratio > high_threshold:
+                        self.logger.info(f"[Multicast High Load] Group {multicast_addr} NOT marked as high load "
+                                         f"(mcast_load={mcast_load:.2f}Mbps, link_bw={link_bw:.2f}Mbps, ratio={load_ratio:.2%} > {high_threshold:.2%})")
+                        continue
+
                 self.multicast_high_load[multicast_addr] = True
-                self.logger.info(f"[Multicast High Load] Group {multicast_addr} marked as high load (link {self.sw_name(src_dpid)}->{self.sw_name(dst_dpid)})")
+                self.logger.info(f"[Multicast High Load] Group {multicast_addr} marked as high load "
+                                 f"(link {self.sw_name(src_dpid)}->{self.sw_name(dst_dpid)}, "
+                                 f"mcast_load={mcast_load:.2f}Mbps, link_bw={link_bw:.2f}Mbps)")
 
     def _recalculate_affected_flows(self):
         """重新计算受拓扑变化影响的流"""
