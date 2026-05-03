@@ -95,7 +95,7 @@ class QoSController(app_manager.RyuApp):
         self.link_high_load_count = {}
         # 组播组高负载标记: {multicast_addr: True/False}
         self.multicast_high_load = {}
-        # 不可替代节点（度为1的节点）
+        # 不可替代节点（出入度和为 1 或 2 的节点）
         self.critical_nodes = set()
 
         self._lock = threading.Lock()
@@ -197,10 +197,18 @@ class QoSController(app_manager.RyuApp):
                 self._mark_multicast_high_load(src_dpid, dst_dpid)
 
     def _mark_multicast_high_load(self, src_dpid, dst_dpid):
-        """如果链路在组播路径中，标记对应组播组为高负载
+        """
+        如果链路在组播路径中，标记对应组播组为高负载
         但如果组播组的负载占链路带宽的比例超过阈值（0.8），则不标记为高负载
+        如果链路任意一端节点是不可替代节点（度=1），代表这条链路也为不可替代链路，则组播组也不标记为高负载
         """
         high_threshold = 0.8
+
+        # 检查链路两端是否都是非临界节点
+        if src_dpid in self.critical_nodes or dst_dpid in self.critical_nodes:
+            self.logger.debug(f"[Multicast High Load] Skipping link {self.sw_name(src_dpid)}->{self.sw_name(dst_dpid)}: "
+                             f"one or both nodes are critical (degree=1)")
+            return
 
         for multicast_addr, flow_info in self.multicast_active_flows.items():
             path = flow_info.get('path', [])
@@ -219,7 +227,7 @@ class QoSController(app_manager.RyuApp):
                 if link_bw > 0:
                     load_ratio = mcast_load / link_bw
                     if load_ratio > high_threshold:
-                        self.logger.info(f"[Multicast High Load] Group {multicast_addr} NOT marked as high load "
+                        self.logger.debug(f"[Multicast High Load] Group {multicast_addr} NOT marked as high load "
                                          f"(mcast_load={mcast_load:.2f}Mbps, link_bw={link_bw:.2f}Mbps, ratio={load_ratio:.2%} > {high_threshold:.2%})")
                         continue
 
@@ -1779,8 +1787,8 @@ class QoSController(app_manager.RyuApp):
         # 从 graph 提取 topology_data
         self.topology_data = self._build_topology_data()
 
-        # 找到度为1的节点（不可替代节点）
-        self.critical_nodes = {node for node, degree in self.graph.degree() if degree == 1}
+        # 找到出入度和为 1 或 2 的节点（不可替代节点）
+        self.critical_nodes = {node for node, degree in self.graph.degree() if (degree == 1 or degree == 2)}
         if self.critical_nodes:
             self.logger.debug(f"Critical nodes (degree=1): {[self.sw_name(n) for n in self.critical_nodes]}")
 
