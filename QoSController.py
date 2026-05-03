@@ -95,6 +95,8 @@ class QoSController(app_manager.RyuApp):
         self.link_high_load_count = {}
         # 组播组高负载标记: {multicast_addr: True/False}
         self.multicast_high_load = {}
+        # 不可替代节点（度为1的节点）
+        self.critical_nodes = set()
 
         self._lock = threading.Lock()
 
@@ -1776,6 +1778,12 @@ class QoSController(app_manager.RyuApp):
 
         # 从 graph 提取 topology_data
         self.topology_data = self._build_topology_data()
+
+        # 找到度为1的节点（不可替代节点）
+        self.critical_nodes = {node for node, degree in self.graph.degree() if degree == 1}
+        if self.critical_nodes:
+            self.logger.debug(f"Critical nodes (degree=1): {[self.sw_name(n) for n in self.critical_nodes]}")
+
         self.logger.debug(f"Topology updated: {self.graph.number_of_nodes()} switches, {self.graph.number_of_edges()} links")
 
     def _build_topology_data(self):
