@@ -141,9 +141,9 @@ class ChinaBackboneTopo(Topo):
             dpid = f'00000000{NetworkLevel.CORE.value:02x}{idx:02x}0001'
             self.core[city] = self.addSwitch(f'C{idx}', dpid=dpid, protocols='OpenFlow13')
         # 全互联
-        self.addLink(self.core['bj'], self.core['sh'], bw=400, delay='22ms', loss=0.2, cls=TCLink)
-        self.addLink(self.core['bj'], self.core['gz'], bw=1000, delay='8ms', loss=0.1, cls=TCLink)
-        self.addLink(self.core['sh'], self.core['gz'], bw=1000, delay='5ms', loss=0.1, cls=TCLink)
+        self.addLink(self.core['bj'], self.core['sh'], bw=400, delay='22ms', loss=0.3, cls=TCLink)
+        self.addLink(self.core['bj'], self.core['gz'], bw=1000, delay='8ms', loss=0.05, cls=TCLink)
+        self.addLink(self.core['sh'], self.core['gz'], bw=1000, delay='5ms', loss=0.05, cls=TCLink)
 
     def _build_agg(self):
         """汇聚层：西安、成都、武汉、南京、沈阳"""
