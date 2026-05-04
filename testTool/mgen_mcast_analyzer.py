@@ -186,7 +186,7 @@ def plot_stats(flow_summary, sec_stats, output_prefix):
         ax_delay.plot(time_data[flow], delay_data[flow], marker='.', label=f'Flow {flow}', linewidth=1.5)
     ax_delay.axhline(y=avg_delay, color='red', linestyle='--', linewidth=1.5, label=f'Avg: {avg_delay:.2f} ms')
     ax_delay.set_ylabel('Delay (ms)')
-    ax_delay.set_ylim(0, 100)
+    ax_delay.set_ylim(0, 150)
     ax_delay.legend(loc='upper right')
     ax_delay.grid(True, alpha=0.3)
 
@@ -317,7 +317,7 @@ def main():
     axes[0].grid(True, alpha=0.3)
 
     axes[1].set_ylabel('Delay (ms)')
-    axes[1].set_ylim(0, 100)
+    axes[1].set_ylim(0, 150)
     axes[1].legend(loc='upper right')
     axes[1].grid(True, alpha=0.3)
 

@@ -108,6 +108,8 @@ class QoSController(app_manager.RyuApp):
 
         # 链路事件处理开关
         self.link_event_enabled = True  # 默认开启
+        # 组播组重路由开关
+        self.multicast_reroute_enabled = False  # 默认关闭
 
         # 抑制 WSGI HTTP 请求日志
         # 原始实现使用 LoggingWrapper 写日志到 LOG.info
@@ -191,6 +193,9 @@ class QoSController(app_manager.RyuApp):
         3. 剔除高负载链路后检查连通性
         4. 如果连通，重新计算路由并安装
         """
+        if not self.multicast_reroute_enabled:
+            return
+
         if not self.multicast_high_load:
             return
 
@@ -2206,6 +2211,23 @@ class TopologyController(ControllerBase):
                 body = json.loads(req.body.decode('utf-8'))
                 enabled = body.get('enabled', True)
                 self.switch_app.link_event_enabled = enabled
+                response = json.dumps({'success': True, 'enabled': enabled}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=response)
+            except Exception as e:
+                response = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=response)
+
+    @route('topology', '/multicast_reroute', methods=['GET', 'POST'])
+    def set_multicast_reroute(self, req):
+        """获取或设置组播组重路由开关"""
+        if req.method == 'GET':
+            body = json.dumps({'enabled': self.switch_app.multicast_reroute_enabled}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
+        else:
+            try:
+                body = json.loads(req.body.decode('utf-8'))
+                enabled = body.get('enabled', True)
+                self.switch_app.multicast_reroute_enabled = enabled
                 response = json.dumps({'success': True, 'enabled': enabled}, ensure_ascii=False).encode('utf-8')
                 return Response(content_type='application/json; charset=UTF-8', body=response)
             except Exception as e:

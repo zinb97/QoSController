@@ -597,6 +597,14 @@
                     <span id="linkEventLabel" style="font-size: 13px;">Link Events: ON</span>
                 </label>
             </div>
+            <div class="status-item" style="margin-left: 16px;">
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    <input type="checkbox" id="multicastRerouteToggle"
+                           onchange="toggleMulticastReroute(this.checked)"
+                           style="width: 16px; height: 16px; cursor: pointer;">
+                    <span id="multicastRerouteLabel" style="font-size: 13px;">Multicast Reroute: OFF</span>
+                </label>
+            </div>
         </div>
     </header>
 
@@ -1543,6 +1551,33 @@
             }
         }
 
+        async function toggleMulticastReroute(enabled) {
+            try {
+                const response = await fetch('/multicast_reroute', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({enabled: enabled})
+                });
+                const data = await response.json();
+                document.getElementById('multicastRerouteLabel').textContent =
+                    data.enabled ? 'Multicast Reroute: ON' : 'Multicast Reroute: OFF';
+            } catch (e) {
+                console.error('Failed to toggle multicast reroute:', e);
+            }
+        }
+
+        async function loadMulticastRerouteState() {
+            try {
+                const response = await fetch('/multicast_reroute');
+                const data = await response.json();
+                document.getElementById('multicastRerouteLabel').textContent =
+                    data.enabled ? 'Multicast Reroute: ON' : 'Multicast Reroute: OFF';
+                document.getElementById('multicastRerouteToggle').checked = data.enabled;
+            } catch (e) {
+                console.error('Failed to load multicast reroute state:', e);
+            }
+        }
+
         window.onload = function() {
             initNetwork();
             updateTopology();
@@ -1552,6 +1587,7 @@
             updateQosRules();
             loadRoutingAlgorithm();
             loadLinkEventState();
+            loadMulticastRerouteState();
             setInterval(updateTopology, 2000);
             setInterval(updateActiveFlows, 2000);
             setInterval(updateMulticastWeights, 5000);
