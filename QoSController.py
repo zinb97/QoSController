@@ -980,6 +980,9 @@ class QoSController(app_manager.RyuApp):
         if udp_pkt and self._is_multicast_ip(dst_ip):
             return
 
+        if dst_ip.endswith("255"):
+            return
+
         if dst_ip in self.ip_to_mac:
             dst_eth = self.ip_to_mac[dst_ip]
         else:
