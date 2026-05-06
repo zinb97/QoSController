@@ -1,5 +1,6 @@
 import os.path
 import re
+import argparse
 from datetime import datetime
 from collections import defaultdict
 
@@ -9,10 +10,7 @@ plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'Arial Unico
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 # ===================== 配置 =====================
-TEST_PATH = '/home/u/test'
-LOG_FILE = "multi_recv.log"
-OUTPUT_CSV = "mgen_result.csv"
-SUMMARY_FILE = "mgen_summary.txt"
+LOG_PATH = '/home/u/test/multi_recv.log'
 
 flow_name = {
     1: '普通业务流',
@@ -144,8 +142,14 @@ def summary(flow_summary):
         print(f"  最大时延    : {max_d:.2f} ms")
 
 
-def write_detail_csv(flow_summary, sec_stats):
-    """绘制每秒详细折线图"""
+def write_detail_csv(flow_summary, sec_stats, plot_type='all'):
+    """绘制每秒详细折线图
+
+    Args:
+        flow_summary: 全局流统计
+        sec_stats: 每秒统计
+        plot_type: 绘制类型，可选 'bw' (带宽), 'delay' (时延), 'loss' (丢包), 'all' (全部), 或 ['bw', 'delay'] 等列表组合
+    """
     flows = sorted(sec_stats.keys())
     if not flows:
         print("[!] 无数据可绘图")
@@ -169,8 +173,6 @@ def write_detail_csv(flow_summary, sec_stats):
     loss_data = {}  # flow -> [丢包率(%)]
 
     for flow in flows:
-        s_sum = flow_summary[flow]
-
         # 使用第二个程序的丢包率统计方法：基于时间窗口内的 seq 范围计算
         times, bws, delays, losses = [], [], [], []
 
@@ -222,51 +224,127 @@ def write_detail_csv(flow_summary, sec_stats):
             'loss': avg_loss
         }
 
-    # 创建子图：带宽、时延、丢包率
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    # 确定要绘制的子图
+    plot_list = []
+    if isinstance(plot_type, list):
+        # 接受列表类型，如 ['bw', 'delay']
+        plot_list = [p for p in plot_type if p in ('bw', 'delay', 'loss')]
+        if not plot_list:
+            plot_list = ['bw', 'delay', 'loss']
+    elif plot_type == 'all':
+        plot_list = ['bw', 'delay', 'loss']
+    elif plot_type == 'bw':
+        plot_list = ['bw']
+    elif plot_type == 'delay':
+        plot_list = ['delay']
+    elif plot_type == 'loss':
+        plot_list = ['loss']
+    else:
+        print(f"[!] 未知绘图类型: {plot_type}，将绘制全部")
+        plot_list = ['bw', 'delay', 'loss']
 
-    # 带宽子图
-    ax_bw = axes[0]
-    for flow in flows:
-        stat = flow_stats[flow]
-        label = f'{flow_name[flow]} (Bandwidth: {stat["bw"]:.2f} Mbps)'
-        ax_bw.plot(time_data[flow], bw_data[flow], marker='.', label=label, linewidth=1.5)
-    ax_bw.set_ylabel('带宽 (Mbps)')
-    ax_bw.set_title('MGEN 测试 - 带宽/时延/丢包率')
-    ax_bw.legend(loc='upper right')
-    ax_bw.grid(True, alpha=0.3)
+    if not plot_list:
+        return
 
-    # 时延子图
-    ax_delay = axes[1]
-    for flow in flows:
-        stat = flow_stats[flow]
-        label = f'{flow_name[flow]} (Delay: {stat["delay"]:.2f} ms)'
-        ax_delay.plot(time_data[flow], delay_data[flow], marker='.', label=label, linewidth=1.5)
-    ax_delay.set_ylabel('时延 (ms)')
-    ax_delay.legend(loc='upper right')
-    ax_delay.grid(True, alpha=0.3)
+    # 创建子图
+    n_plots = len(plot_list)
+    fig, axes = plt.subplots(n_plots, 1, figsize=(12, 4 * n_plots), sharex=True)
+    if n_plots == 1:
+        axes = [axes]
 
-    # 丢包率子图（正常坐标轴）
-    ax_loss = axes[2]
-    for flow in flows:
-        ax_loss.plot(time_data[flow], loss_data[flow], marker='.', label=f'{flow_name[flow]} (Loss: {flow_stats[flow]["loss"]:.3f}%)', linewidth=1.5)
-    ax_loss.set_ylabel('丢包率 (%)')
-    ax_loss.set_xlabel('时间 (秒)')
-    ax_loss.legend(loc='upper right')
-    ax_loss.grid(True, alpha=0.3)
+    title_map = {'bw': '带宽 (Mbps)', 'delay': '时延 (ms)', 'loss': '丢包率 (%)'}
+    data_map = {'bw': bw_data, 'delay': delay_data, 'loss': loss_data}
+    stat_key = {'bw': 'bw', 'delay': 'delay', 'loss': 'loss'}
+    stat_fmt = {'bw': '{:.2f} Mbps', 'delay': '{:.2f} ms', 'loss': '{:.3f}%'}
+
+    for idx, ptype in enumerate(plot_list):
+        ax = axes[idx]
+        for flow in flows:
+            stat = flow_stats[flow]
+            label = f'{flow_name[flow]} ({stat_fmt[ptype].format(stat[stat_key[ptype]])})'
+            ax.plot(time_data[flow], data_map[ptype][flow], marker='.', label=label, linewidth=1.5)
+        ax.set_ylabel(title_map[ptype])
+        if idx == 0:
+            ax.set_title('MGEN 测试 - ' + '/'.join([title_map[p] for p in plot_list]))
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        if idx == n_plots - 1:
+            ax.set_xlabel('时间 (秒)')
 
     plt.tight_layout()
 
 
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(
+        description='MGEN 日志分析工具 - 解析 MGEN 接收日志并生成带宽/时延/丢包率统计图',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+示例:
+  %(prog)s -i /home/u/test/multi_recv.log              # 分析指定日志文件
+  %(prog)s -i /home/u/test/multi_recv.log -p bw        # 仅绘制带宽图
+  %(prog)s -i /home/u/test/multi_recv.log -p delay      # 仅绘制时延图
+  %(prog)s -i /home/u/test/multi_recv.log -p loss      # 仅绘制丢包率图
+  %(prog)s -i /home/u/test/multi_recv.log -p all       # 绘制全部三个图 (默认)
+  %(prog)s -i /home/u/test/multi_recv.log -p bw,delay  # 绘制带宽和时延图
+  %(prog)s -i /home/u/test/multi_recv.log --no-plot     # 仅输出统计，不绘图
+        '''
+    )
+    parser.add_argument('-i', '--input', dest='log_file', default=LOG_PATH ,
+                        help='MGEN 接收日志文件路径')
+    parser.add_argument('-p', '--plot', dest='plot_type', default='all',
+                        help='指定绘图的类型，可选值: bw (带宽), delay (时延), loss (丢包率), all (全部，默认) 或用逗号分隔组合如 "bw,delay"')
+    parser.add_argument('--no-plot', dest='no_plot', action='store_true',
+                        help='仅输出统计信息，不绘制图表')
+
+    args = parser.parse_args()
+
+    # 处理逗号分隔的绘图类型
+    if args.plot_type and args.plot_type != 'all' and ',' in args.plot_type:
+        plot_types = args.plot_type.split(',')
+        # 去重并保持顺序
+        seen = set()
+        unique_types = []
+        for t in plot_types:
+            t = t.strip().lower()
+            if t not in seen and t in ('bw', 'delay', 'loss'):
+                seen.add(t)
+                unique_types.append(t)
+        if len(unique_types) == 1:
+            args.plot_type = unique_types[0]
+        elif len(unique_types) > 1:
+            # 多类型组合，使用特殊标记或直接传列表
+            args.plot_type = unique_types
+        else:
+            args.plot_type = 'all'
+    elif args.plot_type:
+        args.plot_type = args.plot_type.lower()
+        if args.plot_type not in ('bw', 'delay', 'loss', 'all'):
+            parser.error(f"无效的绘图类型: {args.plot_type}，可选值: bw, delay, loss, all")
+
+    return args
+
+
 def main():
-    print("[+] 解析日志...")
-    flow_summary, sec_stats = parse_mgen_log(os.path.join(TEST_PATH, LOG_FILE))
+    args = parse_args()
+
+    log_path = args.log_file
+    if not os.path.exists(log_path):
+        print(f"[!] 日志文件不存在: {log_path}")
+        return
+
+    print(f"[+] 解析日志: {log_path}")
+    flow_summary, sec_stats = parse_mgen_log(log_path)
     print("[+] 生成汇总报告...")
     summary(flow_summary)
-    print("[+] 生成每秒图表...")
-    write_detail_csv(flow_summary, sec_stats)
-    print("[✔] 完成！")
-    plt.show()
+
+    if not args.no_plot:
+        print("[+] 生成图表...")
+        write_detail_csv(flow_summary, sec_stats, args.plot_type)
+        print("[✔] 完成！")
+        plt.show()
+    else:
+        print("[✔] 完成！(已禁用绘图)")
 
 
 if __name__ == "__main__":

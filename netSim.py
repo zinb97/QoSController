@@ -165,6 +165,9 @@ class ChinaBackboneTopo(Topo):
         self.addLink(self.agg['nj'], self.core['sh'], bw=400, delay='3ms', loss=0.1, cls=TCLink)
         self.addLink(self.agg['sy'], self.core['gz'], bw=400, delay='3ms', loss=0.1, cls=TCLink)
 
+        t4 = self.addHost('t4', ip='10.0.0.104/24')
+        self.addLink(self.agg['xa'], t4)
+
     def _build_access(self):
         """骨干接入层：简化5节点 / 全量23节点"""
         node_cnt = 23 if self.is_full else 6

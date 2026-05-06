@@ -127,14 +127,69 @@ class QoSController(app_manager.RyuApp):
             hub.sleep(3)
 
     def _stats_loop(self):
-        """定期请求交换机端口统计信息"""
+        """定期请求交换机端口统计信息，并根据负载更新 load_balance QoS 规则"""
         while True:
             try:
                 with self._lock:
                     self._request_port_stats()
+                    self._check_and_update_load_balance_rules()
             except Exception as e:
                 self.logger.warning(f"Port stats request failed: {e}")
             hub.sleep(2)
+
+    def _check_and_update_load_balance_rules(self):
+        """检查所有 load_balance QoS 规则的链路负载，必要时重新计算路径"""
+        for rule_id, rule in list(self.qos_rules.items()):
+            if rule.get('guarantee') != 'load_balance':
+                continue
+
+            src_ip = rule.get('src_ip')
+            dst_ip = rule.get('dst_ip')
+            src_dpid = self.host_ip_to_dpid.get(src_ip)
+            dst_dpid = self.host_ip_to_dpid.get(dst_ip)
+            if not src_dpid or not dst_dpid:
+                continue
+
+            current_path = rule.get('path', [])
+            new_path = self.get_shortest_path(src_dpid, dst_dpid, WeightPref.LoadBalance)
+            if not new_path or len(new_path) < 2:
+                continue
+
+            if new_path == current_path:
+                continue
+
+            self.logger.info(f"[LoadBalance] {rule.get('name')}: path changed, re-routing")
+            self.logger.info(f"[LoadBalance] old path: {' -> '.join(self.sw_name(p) for p in current_path)}")
+            self.logger.info(f"[LoadBalance] new path: {' -> '.join(self.sw_name(p) for p in new_path)}")
+
+            # 更新 rule 中的路径信息
+            src_host = self.hosts.get(self.ip_to_mac.get(src_ip), {})
+            dst_host = self.hosts.get(self.ip_to_mac.get(dst_ip), {})
+            path_switches = self.get_path_switches(
+                new_path,
+                src_host.get('dpid', new_path[0]),
+                src_host.get('port', 1),
+                dst_host.get('dpid', new_path[-1]),
+                dst_host.get('port', 1)
+            )
+
+            self.delete_qos_flow(rule)
+            rule['path'] = new_path
+            rule['path_switches'] = path_switches
+
+            # 更新 active_flows
+            self.active_flows[rule_id] = {
+                'type': 'qos',
+                'path': new_path,
+                'path_switches': path_switches,
+                'rule': rule,
+                'src_host': src_host,
+                'dst_host': dst_host,
+            }
+
+            # 删除旧流表，安装新流表
+            self.install_qos_flow(rule)
+            self.logger.info(f"[LoadBalance] {rule.get('name')}: flow table updated")
 
     def _update_affected_flows(self, flow_key):
         flow_info = self.active_flows[flow_key]
