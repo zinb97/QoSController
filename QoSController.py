@@ -2527,4 +2527,15 @@ class TopologyController(ControllerBase):
             error_msg = f"<html><body><h1>Error loading topology page</h1><p>{str(e)}</p></body></html>"
             return Response(content_type='text/html; charset=UTF-8', body=error_msg.encode('utf-8'), status=500)
 
+    @route('topology', '/vis-network.min.js', methods=['GET'])
+    def serve_vis_network(self, req):
+        try:
+            js_path = os.path.join(os.path.dirname(__file__), 'vis-network.min.js')
+            with open(js_path, 'r', encoding='utf-8') as f:
+                js = f.read()
+            return Response(content_type='application/javascript; charset=UTF-8', body=js.encode('utf-8'))
+        except Exception as e:
+            error_msg = f"Error loading vis-network: {str(e)}"
+            return Response(content_type='text/plain; charset=UTF-8', body=error_msg.encode('utf-8'), status=500)
+
 
