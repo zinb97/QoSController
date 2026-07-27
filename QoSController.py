@@ -104,7 +104,7 @@ class QoSController(app_manager.RyuApp):
 
         # 链路抖动去抖动机制
         self._link_delete_pending = {}  # {(src_dpid, src_port, dst_dpid, dst_port): pending_timer}
-        self._link_delete_delay = 5     # 延迟秒数再删除链路
+        self._link_delete_delay = 0.01     # 延迟秒数再删除链路
 
         # 链路事件处理开关
         self.link_event_enabled = True  # 默认开启
@@ -143,14 +143,69 @@ class QoSController(app_manager.RyuApp):
             hub.sleep(3)
 
     def _stats_loop(self):
-        """定期请求交换机端口统计信息"""
+        """定期请求交换机端口统计信息，并根据负载更新 load_balance QoS 规则"""
         while True:
             try:
                 with self._lock:
                     self._request_port_stats()
+                    self._check_and_update_load_balance_rules()
             except Exception as e:
                 self.logger.warning(f"Port stats request failed: {e}")
             hub.sleep(2)
+
+    def _check_and_update_load_balance_rules(self):
+        """检查所有 load_balance QoS 规则的链路负载，必要时重新计算路径"""
+        for rule_id, rule in list(self.qos_rules.items()):
+            if rule.get('guarantee') != 'load_balance':
+                continue
+
+            src_ip = rule.get('src_ip')
+            dst_ip = rule.get('dst_ip')
+            src_dpid = self.host_ip_to_dpid.get(src_ip)
+            dst_dpid = self.host_ip_to_dpid.get(dst_ip)
+            if not src_dpid or not dst_dpid:
+                continue
+
+            current_path = rule.get('path', [])
+            new_path = self.get_shortest_path(src_dpid, dst_dpid, WeightPref.LoadBalance)
+            if not new_path or len(new_path) < 2:
+                continue
+
+            if new_path == current_path:
+                continue
+
+            self.logger.info(f"[LoadBalance] {rule.get('name')}: path changed, re-routing")
+            self.logger.info(f"[LoadBalance] old path: {' -> '.join(self.sw_name(p) for p in current_path)}")
+            self.logger.info(f"[LoadBalance] new path: {' -> '.join(self.sw_name(p) for p in new_path)}")
+
+            # 更新 rule 中的路径信息
+            src_host = self.hosts.get(self.ip_to_mac.get(src_ip), {})
+            dst_host = self.hosts.get(self.ip_to_mac.get(dst_ip), {})
+            path_switches = self.get_path_switches(
+                new_path,
+                src_host.get('dpid', new_path[0]),
+                src_host.get('port', 1),
+                dst_host.get('dpid', new_path[-1]),
+                dst_host.get('port', 1)
+            )
+
+            self.delete_qos_flow(rule)
+            rule['path'] = new_path
+            rule['path_switches'] = path_switches
+
+            # 更新 active_flows
+            self.active_flows[rule_id] = {
+                'type': 'qos',
+                'path': new_path,
+                'path_switches': path_switches,
+                'rule': rule,
+                'src_host': src_host,
+                'dst_host': dst_host,
+            }
+
+            # 删除旧流表，安装新流表
+            self.install_qos_flow(rule)
+            self.logger.info(f"[LoadBalance] {rule.get('name')}: flow table updated")
 
     def _multicast_load_loop(self):
         """定期请求组播组源交换机的流表统计，计算组播组负载"""
@@ -487,10 +542,101 @@ class QoSController(app_manager.RyuApp):
                                  f"(link {self.sw_name(src_dpid)}->{self.sw_name(dst_dpid)}, "
                                  f"mcast_load={mcast_load:.2f}Mbps, link_bw={link_bw:.2f}Mbps)")
 
+
+    def _update_affected_flows(self, flow_key):
+        flow_info = self.active_flows[flow_key]
+
+        if not flow_info:
+            self.logger.info(f"[ERROR] {flow_key} 为空")
+            return
+
+        if flow_info.get('type') == 'flow':
+            src_ip, dst_ip = flow_key
+            self.logger.info(f"[Route] update flow: {src_ip}->{dst_ip}")
+            src_host, dst_host = flow_info['src_host'], flow_info['dst_host']
+            self._delete_flow(src_ip, dst_ip)
+
+            # 重新计算路径
+            new_path = self.get_shortest_path(src_host['dpid'], dst_host['dpid'])
+            if not new_path or len(new_path) < 2:
+                self.logger.warning(f"[ERROR] 重新计算路径失败，删除流 {src_ip} -> {dst_ip}")
+                del self.active_flows[flow_key]
+                return
+
+            self.logger.info(f"[Route] new path: {' -> '.join(self.switch_name.get(f'{p:016x}', f'{p}') for p in new_path)}")
+            path_switches = self.get_path_switches(new_path, src_host['dpid'], src_host['port'], dst_host['dpid'], dst_host['port'])
+            self._add_path_flow(src_ip, dst_ip, path_switches)
+            # 更新活跃流信息
+            self.active_flows[flow_key] = {
+                'type': 'flow',
+                'path': new_path,
+                'path_switches': path_switches,
+                'src_host': src_host,
+                'dst_host': dst_host
+            }
+            self.logger.info(f"[Route] 流表更新完成: {src_ip} -> {dst_ip}")
+
+        if flow_info.get('type') == 'qos':
+            # QoS 规则的重新计算
+            rule_id = flow_key
+            rule = flow_info.get('rule')
+            self.logger.info(f"[QoS] update qos: {rule['name']}")
+
+            if not rule or rule_id is None:
+                self.logger.info(f"[ERROR] {rule_id} 为空")
+
+            self.delete_qos_flow(rule)
+
+            src_ip, dst_ip = rule['src_ip'], rule['dst_ip']
+            guarantee = rule['guarantee']
+            src_dpid = self.host_ip_to_dpid.get(src_ip)
+            dst_dpid = self.host_ip_to_dpid.get(dst_ip)
+
+            if not src_dpid or not dst_dpid:
+                self.logger.warning(f"[ERROR] IP {src_ip}/{src_ip} not find")
+                return
+
+            pref_map = {
+                'default': None,
+                'bandwidth': WeightPref.Bandwidth,
+                'latency': WeightPref.Latency,
+                'loss_rate': WeightPref.LossRate,
+                'load_balance': WeightPref.LoadBalance,
+                'smart_algorithm': WeightPref.SmartAlgorithm
+            }
+            preference = pref_map.get(guarantee)
+            new_path = self.get_shortest_path(src_dpid, dst_dpid, preference)
+
+            if not new_path or len(new_path) < 2:
+                self.logger.warning(f"[QoS ERROR] {rule.get('name')}重新计算路径失败")
+                return
+
+            rule['path'] = new_path
+            src_host = self.hosts.get(self.ip_to_mac.get(src_ip), {})
+            dst_host = self.hosts.get(self.ip_to_mac.get(dst_ip), {})
+            path_switches = self.get_path_switches(
+                new_path,
+                src_host.get('dpid', new_path[0]),
+                src_host.get('port', 1),
+                dst_host.get('dpid', new_path[-1]),
+                dst_host.get('port', 1)
+            )
+            rule['path_switches'] = path_switches
+
+            # 更新 qos_rules active_flows 中的记录
+            self.qos_rules[rule_id] = rule
+            self.active_flows[rule_id] = {
+                'type': 'qos',
+                'path': new_path,
+                'path_switches': path_switches,
+                'rule': rule,
+                'src_host': src_host,
+                'dst_host': dst_host,
+            }
+            self.install_qos_flow(rule)
+
     def _recalculate_affected_flows(self):
         """重新计算受拓扑变化影响的流"""
-        affected_flows = []
-
         for flow_key, flow_info in list(self.active_flows.items()):
             path = flow_info['path']
             need_recalc = False
@@ -511,98 +657,7 @@ class QoSController(app_manager.RyuApp):
                         break
 
             if need_recalc:
-                affected_flows.append(flow_key)
-
-        if affected_flows:
-            self.logger.info(f"[Route] 需要重新计算的流: {len(affected_flows)}: {affected_flows}")
-
-        # 重新计算每条受影响的流
-        for flow_key in affected_flows:
-            flow_info = self.active_flows[flow_key]
-            if not flow_info:
-                continue
-
-            if flow_info.get('type') == 'flow':
-                src_ip, dst_ip = flow_key
-
-                src_host, dst_host = flow_info['src_host'], flow_info['dst_host']
-                self._delete_flow(src_ip, dst_ip)
-
-                # 重新计算路径
-                new_path = self.get_shortest_path(src_host['dpid'], dst_host['dpid'])
-                if not new_path or len(new_path) < 2:
-                    self.logger.warning(f"[Route] 重新计算路径失败，删除流 {src_ip} -> {dst_ip}")
-                    del self.active_flows[flow_key]
-                    continue
-
-                self.logger.info(f"[Route] new path: {' -> '.join(self.switch_name.get(f'{p:016x}', f'{p}') for p in new_path)}")
-                path_switches = self.get_path_switches(new_path, src_host['dpid'], src_host['port'], dst_host['dpid'], dst_host['port'])
-                self._add_path_flow(src_ip, dst_ip, path_switches)
-                # 更新活跃流信息
-                self.active_flows[flow_key] = {
-                    'path': new_path,
-                    'path_switches': path_switches,
-                    'src_host': src_host,
-                    'dst_host': dst_host
-                }
-                self.logger.info(f"[Route] 流表重新下发完成: {src_ip} -> {dst_ip}")
-            if flow_info.get('type') == 'qos':
-                # QoS 规则的重新计算
-                rule_id = flow_key
-                rule = flow_info.get('rule')
-                if not rule or rule_id is None:
-                    continue
-
-                self.delete_qos_flow(rule)
-
-                src_ip = rule['src_ip']
-                dst_ip = rule['dst_ip']
-                guarantee = rule['guarantee']
-                src_dpid = self.host_ip_to_dpid.get(src_ip)
-                dst_dpid = self.host_ip_to_dpid.get(dst_ip)
-
-                if not src_dpid or not dst_dpid:
-                    self.logger.warning(f"[QoS] IP {src_ip}/{src_ip} not find")
-                    continue
-
-                pref_map = {
-                    'default': None,
-                    'bandwidth': WeightPref.Bandwidth,
-                    'latency': WeightPref.Latency,
-                    'loss_rate': WeightPref.LossRate,
-                    'load_balance': WeightPref.LoadBalance,
-                    'smart_algorithm': WeightPref.SmartAlgorithm
-                }
-                preference = pref_map.get(guarantee)
-                new_path = self.get_shortest_path(src_dpid, dst_dpid, preference)
-
-                if not new_path or len(new_path) < 2:
-                    self.logger.warning(f"[QoS] {rule.get('name')}重新计算路径失败")
-                    continue
-
-                rule['path'] = new_path
-                src_host = self.hosts.get(self.ip_to_mac.get(src_ip), {})
-                dst_host = self.hosts.get(self.ip_to_mac.get(dst_ip), {})
-                path_switches = self.get_path_switches(
-                    new_path,
-                    src_host.get('dpid', new_path[0]),
-                    src_host.get('port', 1),
-                    dst_host.get('dpid', new_path[-1]),
-                    dst_host.get('port', 1)
-                )
-                rule['path_switches'] = path_switches
-
-                # 更新 qos_rules active_flows 中的记录
-                self.qos_rules[rule_id] = rule
-                self.active_flows[rule_id] = {
-                    'type': 'qos',
-                    'path': new_path,
-                    'path_switches': path_switches,
-                    'rule': rule,
-                    'src_host': src_host,
-                    'dst_host': dst_host,
-                }
-                self.install_qos_flow(rule)
+                self._update_affected_flows(flow_key)
 
     def check_better_path_for_active_flows(self):
         """检查所有活跃流是否有更优路径可走"""
@@ -680,6 +735,7 @@ class QoSController(app_manager.RyuApp):
 
                 # 更新活跃流信息
                 self.active_flows[flow_key] = {
+                    'type': 'flow',
                     'path': new_path,
                     'path_switches': path_switches,
                     'src_host': src_host,
@@ -751,7 +807,7 @@ class QoSController(app_manager.RyuApp):
     def _add_path_flow(self, src_ip, dst_ip, path_switches):
         # 路径流表
         priority = 10
-        idle_timeout = 30
+        idle_timeout = 300
         for ps in path_switches:
             sw_dp = self.datapaths.get(ps['dpid'])
             if sw_dp:
@@ -779,7 +835,7 @@ class QoSController(app_manager.RyuApp):
                 parser = sw_dp.ofproto_parser
                 ofproto = sw_dp.ofproto
                 # 删除正向流
-                match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IP, ipv4_src=src_ip, ipv4_dst=dst_ip)
+                match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IP, ipv4_src=src_ip, ipv4_dst=dst_ip, ip_dscp=0)
                 del_flow = parser.OFPFlowMod(
                     datapath=sw_dp,
                     command=ofproto.OFPFC_DELETE,
@@ -791,7 +847,7 @@ class QoSController(app_manager.RyuApp):
                 )
                 sw_dp.send_msg(del_flow)
                 # 删除反向流
-                match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IP, ipv4_src=dst_ip, ipv4_dst=src_ip)
+                match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IP, ipv4_src=dst_ip, ipv4_dst=src_ip, ip_dscp=0)
                 del_flow = parser.OFPFlowMod(
                     datapath=sw_dp,
                     command=ofproto.OFPFC_DELETE,
@@ -1243,19 +1299,18 @@ class QoSController(app_manager.RyuApp):
             ofproto = datapath.ofproto
             if msg.reason not in (ofproto.OFPRR_IDLE_TIMEOUT, ofproto.OFPRR_HARD_TIMEOUT):
                 return
-            dpid = datapath.id
 
+            dpid = datapath.id
             match = msg.match
             ipv4_src = match.get('ipv4_src')
             ipv4_dst = match.get('ipv4_dst')
             if not ipv4_src or not ipv4_dst:
                 return
 
-            if ipv4_src and ipv4_dst:
-                flow_key = (ipv4_src, ipv4_dst)
-                if flow_key in self.active_flows:
-                    del self.active_flows[flow_key]
-                    self.logger.info(f"[FlowRemoved] Flow expired on SW:{self.sw_name(dpid)}: {ipv4_src} -> {ipv4_dst}, removed from active_flows")
+            flow_key = (ipv4_src, ipv4_dst)
+            if flow_key in self.active_flows:
+                del self.active_flows[flow_key]
+                self.logger.info(f"[FlowRemoved] Flow expired on SW:{self.sw_name(dpid)}: {ipv4_src} -> {ipv4_dst}, removed from active_flows")
         except Exception as e:
             self.logger.info(f'Event OFPFlowRemoved {e}')
 
@@ -1373,6 +1428,9 @@ class QoSController(app_manager.RyuApp):
 
         # UDP 组播报文直接丢弃
         if udp_pkt and self._is_multicast_ip(dst_ip):
+            return
+
+        if dst_ip.endswith("255"):
             return
 
         if dst_ip in self.ip_to_mac:
@@ -2124,7 +2182,7 @@ class QoSController(app_manager.RyuApp):
                 def weight_load(u, v, d):
                     bw = d.get("bw", 0.1)
                     load= d.get("total_bps", 0)
-                    return 1 / (bw - load) if bw != load else 999
+                    return 1 / (bw - load) if bw > load else 999
                 path = nx.shortest_path(self.graph, src, dst, weight=weight_load)
             elif preference == WeightPref.Latency:
                 path = nx.shortest_path(self.graph, src, dst, weight='delay')
@@ -2468,5 +2526,16 @@ class TopologyController(ControllerBase):
         except Exception as e:
             error_msg = f"<html><body><h1>Error loading topology page</h1><p>{str(e)}</p></body></html>"
             return Response(content_type='text/html; charset=UTF-8', body=error_msg.encode('utf-8'), status=500)
+
+    @route('topology', '/vis-network.min.js', methods=['GET'])
+    def serve_vis_network(self, req):
+        try:
+            js_path = os.path.join(os.path.dirname(__file__), 'vis-network.min.js')
+            with open(js_path, 'r', encoding='utf-8') as f:
+                js = f.read()
+            return Response(content_type='application/javascript; charset=UTF-8', body=js.encode('utf-8'))
+        except Exception as e:
+            error_msg = f"Error loading vis-network: {str(e)}"
+            return Response(content_type='text/plain; charset=UTF-8', body=error_msg.encode('utf-8'), status=500)
 
 

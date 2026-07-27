@@ -6,13 +6,14 @@ Mininet Topology Generator - 重构优化版
 import random
 from enum import Enum
 from functools import partial
-from mininet.link import TCLink
-from mininet.topo import Topo
-from mininet.node import OVSSwitch
+
 from mininet.cli import CLI
-from mininet.net import Mininet
+from mininet.link import TCLink, Intf
 from mininet.log import setLogLevel, info
+from mininet.net import Mininet
+from mininet.node import OVSSwitch
 from mininet.node import RemoteController
+from mininet.topo import Topo
 
 # 自定义CLI提示符
 CLI.prompt = 'netSim> '
@@ -141,9 +142,14 @@ class ChinaBackboneTopo(Topo):
             dpid = f'00000000{NetworkLevel.CORE.value:02x}{idx:02x}0001'
             self.core[city] = self.addSwitch(f'C{idx}', dpid=dpid, protocols='OpenFlow13')
         # 全互联
-        self.addLink(self.core['bj'], self.core['sh'], bw=400, delay='22ms', loss=0.2, cls=TCLink)
-        self.addLink(self.core['bj'], self.core['gz'], bw=1000, delay='8ms', loss=0.1, cls=TCLink)
-        self.addLink(self.core['sh'], self.core['gz'], bw=1000, delay='5ms', loss=0.1, cls=TCLink)
+        self.addLink(self.core['bj'], self.core['sh'], bw=400, delay='22ms', loss=0.3, cls=TCLink)
+        self.addLink(self.core['bj'], self.core['gz'], bw=400, delay='8ms', loss=0.05, cls=TCLink)
+        self.addLink(self.core['sh'], self.core['gz'], bw=400, delay='5ms', loss=0.05, cls=TCLink)
+
+        test_hosts = [self.addHost(f't{i + 1}', ip=f'10.0.0.10{i + 1}/24') for i in range(3)]
+        self.addLink(self.core['bj'], test_hosts[0])
+        self.addLink(self.core['sh'], test_hosts[1])
+        self.addLink(self.core['gz'], test_hosts[2])
 
     def _build_agg(self):
         """汇聚层：西安、成都、武汉、南京、沈阳"""
@@ -158,6 +164,9 @@ class ChinaBackboneTopo(Topo):
         self.addLink(self.agg['wh'], self.core['bj'], bw=400, delay='3ms', loss=0.1, cls=TCLink)
         self.addLink(self.agg['nj'], self.core['sh'], bw=400, delay='3ms', loss=0.1, cls=TCLink)
         self.addLink(self.agg['sy'], self.core['gz'], bw=400, delay='3ms', loss=0.1, cls=TCLink)
+
+        t4 = self.addHost('t4', ip='10.0.0.104/24')
+        self.addLink(self.agg['xa'], t4)
 
     def _build_access(self):
         """骨干接入层：简化5节点 / 全量23节点"""
@@ -190,6 +199,15 @@ def run_chinanet(level=3, is_full=False, prov_depth=3, prov_width=3):
     topo = ChinaBackboneTopo(level=level, is_full=is_full, prov_depth=prov_depth, prov_width=prov_width)
     switch = partial(OVSSwitch, protocols='OpenFlow13')
     net = Mininet(topo=topo, controller=lambda n: RemoteController(n, ip='127.0.0.1'), switch=switch)
+
+    print('bind interface')
+    Intf('enp71s0f0', node=net.switches[10])
+    Intf('enp71s0f1', node=net.switches[10])
+    Intf('enp71s0f2', node=net.switches[11])
+    # Intf('enp71s0f0', node=net.acc[-1])
+    # Intf('enp71s0f1', node=net.acc[-1])
+    # Intf('enp71s0f2', node=net.acc[-1])
+
     net.start()
     info(f"\n✅ 骨干网拓扑启动完成 | 仿真层级：{level} | 全量节点：{is_full} | 省网树(深{prov_depth}x宽{prov_width})\n")
     CLI(net)
