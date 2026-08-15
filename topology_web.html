@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>QoS Controller - SDN Network</title>
+    <title>QoS 控制器 - SDN 网络</title>
     <script src="vis-network.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -105,10 +105,74 @@
             font-size: 14px;
             font-weight: 500;
             color: #c9d1d9;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
         }
 
         .canvas-title span {
             color: #79c0ff;
+        }
+
+        .slice-selector {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 6px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+        }
+
+        .slice-option {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            color: #8b949e;
+            transition: all 0.15s;
+            user-select: none;
+        }
+
+        .slice-option:hover {
+            color: #c9d1d9;
+            background: #21262d;
+        }
+
+        .slice-option input[type="checkbox"] {
+            width: 14px;
+            height: 14px;
+            cursor: pointer;
+            accent-color: #2ea043;
+        }
+
+        .slice-option.active {
+            color: #f0f6fc;
+            background: #1f6feb22;
+            border: 1px solid #1f6feb55;
+        }
+
+        .slice-option.active input[type="checkbox"] {
+            accent-color: #1f6feb;
+        }
+
+        .slice-divider {
+            width: 1px;
+            height: 16px;
+            background: #30363d;
+        }
+
+        .slice-label {
+            font-size: 11px;
+            color: #79c0ff;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-right: 4px;
         }
 
         .last-update {
@@ -579,21 +643,21 @@
         <div class="logo">
             <div class="logo-icon">⚡</div>
             <div class="logo-text">
-                <h1>QoS Controller</h1>
-                <span>SDN Network Visualization</span>
+                <h1>QoS 控制器</h1>
+                <span>SDN 网络可视化</span>
             </div>
         </div>
         <div class="status-bar">
             <div class="status-item">
                 <div class="status-dot"></div>
-                <span>Controller Connected</span>
+                <span>控制器已连接</span>
             </div>
             <div class="status-item" style="margin-left: 16px;">
                 <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
                     <input type="checkbox" id="linkEventToggle" checked
                            onchange="toggleLinkEvent(this.checked)"
                            style="width: 16px; height: 16px; cursor: pointer;">
-                    <span id="linkEventLabel" style="font-size: 13px;">Link Events: ON</span>
+                    <span id="linkEventLabel" style="font-size: 13px;">链路事件: 开启</span>
                 </label>
             </div>
             <div class="status-item" style="margin-left: 16px;">
@@ -601,7 +665,7 @@
                     <input type="checkbox" id="multicastRerouteToggle"
                            onchange="toggleMulticastReroute(this.checked)"
                            style="width: 16px; height: 16px; cursor: pointer;">
-                    <span id="multicastRerouteLabel" style="font-size: 13px;">Multicast Reroute: OFF</span>
+                    <span id="multicastRerouteLabel" style="font-size: 13px;">组播重路由: 关闭</span>
                 </label>
             </div>
         </div>
@@ -610,9 +674,28 @@
     <main class="main">
         <div class="canvas-container">
             <div class="canvas-header">
-                <div class="canvas-title">Network Topology (<span id="switchCount">0</span> switches)</div>
+                <div class="canvas-title">
+                    <span>网络拓扑 (<span id="switchCount">0</span> 台交换机)</span>
+                    <div class="slice-selector">
+                        <span class="slice-label">网络切片</span>
+                        <label class="slice-option active">
+                            <input type="checkbox" id="sliceAll" checked onchange="selectSlice('all', this)">
+                            <span>网络总拓扑</span>
+                        </label>
+                        <div class="slice-divider"></div>
+                        <label class="slice-option">
+                            <input type="checkbox" id="sliceLowLatency" onchange="selectSlice('low-latency', this)">
+                            <span>低时延切片</span>
+                        </label>
+                        <div class="slice-divider"></div>
+                        <label class="slice-option">
+                            <input type="checkbox" id="sliceLowLoss" onchange="selectSlice('low-loss', this)">
+                            <span>低丢包切片</span>
+                        </label>
+                    </div>
+                </div>
                 <div class="last-update">
-                    <span>Last update: <span id="lastUpdate">--:--:--</span></span>
+                    <span>最后更新: <span id="lastUpdate">--:--:--</span></span>
                     <span class="algo-badge" id="algoBadge">🧠 智能算法</span>
                 </div>
             </div>
@@ -631,10 +714,10 @@
                     font-size: 12px;
                     cursor: pointer;
                     margin-bottom: 8px;
-                ">Collapse All</button>
+                ">全部折叠</button>
             </div>
             <div class="sidebar-section" id="routingSection">
-                <div class="section-title" onclick="toggleSection('routingSection')">Routing Algorithm</div>
+                <div class="section-title" onclick="toggleSection('routingSection')">路由算法</div>
                 <div class="routing-select" style="margin-bottom: 8px;">
                     <div class="algo-options" id="algoOptions" style="display: flex; flex-direction: column; gap: 6px;">
                         <div class="algo-option" data-value="smart" onclick="selectAlgorithm('smart')" style="
@@ -669,110 +752,110 @@
                 </div>
             </div>
             <div class="sidebar-section" id="statsSection">
-                <div class="section-title" onclick="toggleSection('statsSection')">Statistics</div>
+                <div class="section-title" onclick="toggleSection('statsSection')">统计信息</div>
                 <div class="stats-grid">
                     <div class="stat-card">
                         <div class="stat-value" id="statSwitches">0</div>
-                        <div class="stat-label">Switches</div>
+                        <div class="stat-label">交换机</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-value" id="statHosts">0</div>
-                        <div class="stat-label">Hosts</div>
+                        <div class="stat-label">主机</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-value" id="statLinks">0</div>
-                        <div class="stat-label">Links</div>
+                        <div class="stat-label">链路</div>
                     </div>
                 </div>
             </div>
 
             <div class="sidebar-section" id="legendSection">
-                <div class="section-title" onclick="toggleSection('legendSection')">Legend</div>
+                <div class="section-title" onclick="toggleSection('legendSection')">图例</div>
                 <div class="legend">
                     <div class="legend-item">
                         <div class="legend-color switch"></div>
-                        <span>OpenFlow Switch</span>
+                        <span>OpenFlow 交换机</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-color host"></div>
-                        <span>Host</span>
+                        <span>主机</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-color link"></div>
-                        <span>Network Link</span>
+                        <span>网络链路</span>
                     </div>
                 </div>
             </div>
 
             <div class="sidebar-section" id="levelsSection">
-                <div class="section-title" onclick="toggleSection('levelsSection')">Network Levels</div>
+                <div class="section-title" onclick="toggleSection('levelsSection')">网络层级</div>
                 <div class="legend">
                     <div class="legend-item">
                         <div class="legend-color" style="background:#e74c3c"></div>
-                        <span>L1 - Core (核心层)</span>
+                        <span>L1 - 核心层 (Core)</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background:#f39c12"></div>
-                        <span>L2 - Aggregation (汇聚层)</span>
+                        <span>L2 - 汇聚层 (Aggregation)</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background:#27ae60"></div>
-                        <span>L3 - Backbone Access (骨干接入)</span>
+                        <span>L3 - 骨干接入 (Backbone Access)</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background:#3498db"></div>
-                        <span>L4 - Province Core (省网核心)</span>
+                        <span>L4 - 省网核心 (Province Core)</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background:#9b59b6"></div>
-                        <span>L5 - Province Access (省网接入)</span>
+                        <span>L5 - 省网接入 (Province Access)</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background:#95a5a6"></div>
-                        <span>L6 - Metro Access (城域接入)</span>
+                        <span>L6 - 城域接入 (Metro Access)</span>
                     </div>
                 </div>
             </div>
 
             <div class="sidebar-section" id="displaySection">
-                <div class="section-title" onclick="toggleSection('displaySection')">Display Options</div>
+                <div class="section-title" onclick="toggleSection('displaySection')">显示选项</div>
                 <div class="toggle-row">
-                    <span class="toggle-label">Show Hosts</span>
+                    <span class="toggle-label">显示主机</span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="showHosts" checked>
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
                 <div class="toggle-row">
-                    <span class="toggle-label">Show Bandwidth</span>
+                    <span class="toggle-label">显示带宽</span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="showBandwidth">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
                 <div class="toggle-row">
-                    <span class="toggle-label">Show Delay</span>
+                    <span class="toggle-label">显示时延</span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="showDelay">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
                 <div class="toggle-row">
-                    <span class="toggle-label">Show Loss Rate</span>
+                    <span class="toggle-label">显示丢包率</span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="showLoss">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
                 <div class="toggle-row">
-                    <span class="toggle-label">Show Load</span>
+                    <span class="toggle-label">显示负载</span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="showLoad">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
                 <div class="toggle-row">
-                    <span class="toggle-label">Fix Topology</span>
+                    <span class="toggle-label">锁定拓扑</span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="fixTopology">
                         <span class="toggle-slider"></span>
@@ -781,68 +864,68 @@
             </div>
 
             <div class="sidebar-section" id="switchesSection">
-                <div class="section-title" onclick="toggleSection('switchesSection')">Switches</div>
+                <div class="section-title" onclick="toggleSection('switchesSection')">交换机列表</div>
                 <div class="switch-list" id="switchList">
                     <div class="switch-item">
                         <div class="switch-icon">⬡</div>
                         <div class="switch-info">
-                            <div class="switch-name">Waiting for data...</div>
+                            <div class="switch-name">等待数据...</div>
                         </div>
                     </div>
                 </div>
             </div>
 
             <div class="sidebar-section" id="hostsSection">
-                <div class="section-title" onclick="toggleSection('hostsSection')">Hosts</div>
+                <div class="section-title" onclick="toggleSection('hostsSection')">主机列表</div>
                 <div class="switch-list" id="hostList">
                     <div class="host-item">
                         <div class="host-icon">▣</div>
                         <div class="host-info">
-                            <div class="host-name">No hosts detected</div>
+                            <div class="host-name">未检测到主机</div>
                         </div>
                     </div>
                 </div>
             </div>
 
             <div class="sidebar-section" id="flowsSection">
-                <div class="section-title" onclick="toggleSection('flowsSection')">Active Flows</div>
+                <div class="section-title" onclick="toggleSection('flowsSection')">活跃流表</div>
                 <div class="switch-list" id="flowList">
                     <div class="switch-item">
                         <div class="switch-info">
-                            <div class="switch-name">No active flows</div>
+                            <div class="switch-name">无活跃流</div>
                         </div>
                     </div>
                 </div>
             </div>
 
             <div class="sidebar-section" id="multicastSection">
-                <div class="section-title" onclick="toggleSection('multicastSection')">Multicast Weights</div>
+                <div class="section-title" onclick="toggleSection('multicastSection')">组播权重</div>
                 <div class="switch-list" id="multicastWeightList">
                     <div class="switch-item">
                         <div class="switch-info">
-                            <div class="switch-name">Loading...</div>
+                            <div class="switch-name">加载中...</div>
                         </div>
                     </div>
                 </div>
             </div>
 
             <div class="sidebar-section" id="qosSection">
-                <div class="section-title" onclick="toggleSection('qosSection')">QoS Rules</div>
+                <div class="section-title" onclick="toggleSection('qosSection')">QoS 规则</div>
                 <div class="switch-list" id="qosRuleList">
                     <div class="switch-item">
                         <div class="switch-info">
-                            <div class="switch-name">Loading...</div>
+                            <div class="switch-name">加载中...</div>
                         </div>
                     </div>
                 </div>
             </div>
 
             <div class="sidebar-section" id="multicastFlowsSection">
-                <div class="section-title" onclick="toggleSection('multicastFlowsSection')">Multicast Active Flows</div>
+                <div class="section-title" onclick="toggleSection('multicastFlowsSection')">组播活跃流</div>
                 <div class="switch-list" id="multicastFlowList">
                     <div class="switch-item">
                         <div class="switch-info">
-                            <div class="switch-name">Loading...</div>
+                            <div class="switch-name">加载中...</div>
                         </div>
                     </div>
                 </div>
@@ -855,16 +938,16 @@
         <div class="modal">
             <div class="modal-header">
                 <div class="modal-title">
-                    Switch Flow Table
+                    交换机流表
                     <span id="modalSwitchDpid"></span>
                 </div>
                 <div style="display: flex; align-items: center;">
-                    <button class="refresh-btn" onclick="refreshFlowTable()">Refresh</button>
+                    <button class="refresh-btn" onclick="refreshFlowTable()">刷新</button>
                     <button class="modal-close" onclick="closeFlowModal()">&times;</button>
                 </div>
             </div>
             <div class="modal-body" id="modalBody">
-                <div class="loading">Loading...</div>
+                <div class="loading">加载中...</div>
             </div>
         </div>
     </div>
@@ -873,11 +956,11 @@
     <div class="modal-overlay" id="loadingOverlay">
         <div class="modal" style="width: 280px; text-align: center;">
             <div class="modal-header" style="justify-content: center;">
-                <div class="modal-title">Processing...</div>
+                <div class="modal-title">处理中...</div>
             </div>
             <div class="modal-body" style="padding: 30px 20px;">
                 <div class="loading-spinner"></div>
-                <div style="margin-top: 20px; color: #c9d1d9; font-size: 14px;" id="loadingText">Please wait</div>
+                <div style="margin-top: 20px; color: #c9d1d9; font-size: 14px;" id="loadingText">请稍候</div>
             </div>
         </div>
     </div>
@@ -1077,7 +1160,7 @@
                 <div class="switch-item" onclick="openFlowModal(${s.dpid})" style="cursor: pointer;">
                     <div class="switch-icon" style="background:${levelColor.bg}">⬡</div>
                     <div class="switch-info">
-                        <div class="switch-name">Switch ${s.name} (L${s.level})</div>
+                        <div class="switch-name">交换机 ${s.name} (L${s.level})</div>
                         <div class="switch-dpid">DPID: 0x${s.dpid.toString(16).padStart(16, '0')}</div>
                     </div>
                 </div>
@@ -1089,7 +1172,7 @@
                     <div class="host-item">
                         <div class="host-icon">▣</div>
                         <div class="host-info">
-                            <div class="host-name">No hosts detected</div>
+                            <div class="host-name">未检测到主机</div>
                         </div>
                     </div>
                 `;
@@ -1117,7 +1200,7 @@
                     flowList.innerHTML = `
                         <div class="switch-item">
                             <div class="switch-info">
-                                <div class="switch-name">No active flows</div>
+                                <div class="switch-name">无活跃流</div>
                             </div>
                         </div>
                     `;
@@ -1155,7 +1238,7 @@
                     flowList.innerHTML = `
                         <div class="switch-item">
                             <div class="switch-info">
-                                <div class="switch-name">No multicast active flows</div>
+                                <div class="switch-name">无组播活跃流</div>
                             </div>
                         </div>
                     `;
@@ -1508,11 +1591,11 @@
             if (allCollapsed) {
                 // Expand all
                 sections.forEach(s => s.classList.remove('collapsed'));
-                btn.textContent = 'Collapse All';
+                btn.textContent = '全部折叠';
             } else {
                 // Collapse all
                 sections.forEach(s => s.classList.add('collapsed'));
-                btn.textContent = 'Expand All';
+                btn.textContent = '全部展开';
             }
         }
 
@@ -1529,7 +1612,7 @@
                 if (data.success) {
                     linkEventEnabled = data.enabled;
                     document.getElementById('linkEventLabel').textContent =
-                        data.enabled ? 'Link Events: ON' : 'Link Events: OFF';
+                        data.enabled ? '链路事件: 开启' : '链路事件: 关闭';
                     document.getElementById('linkEventToggle').checked = data.enabled;
                 }
             } catch (e) {
@@ -1543,7 +1626,7 @@
                 const data = await response.json();
                 linkEventEnabled = data.enabled;
                 document.getElementById('linkEventLabel').textContent =
-                    data.enabled ? 'Link Events: ON' : 'Link Events: OFF';
+                    data.enabled ? '链路事件: 开启' : '链路事件: 关闭';
                 document.getElementById('linkEventToggle').checked = data.enabled;
             } catch (e) {
                 console.error('Failed to load link event state:', e);
@@ -1559,10 +1642,53 @@
                 });
                 const data = await response.json();
                 document.getElementById('multicastRerouteLabel').textContent =
-                    data.enabled ? 'Multicast Reroute: ON' : 'Multicast Reroute: OFF';
+                    data.enabled ? '组播重路由: 开启' : '组播重路由: 关闭';
             } catch (e) {
                 console.error('Failed to toggle multicast reroute:', e);
             }
+        }
+
+        let currentSlice = 'all';
+
+        function selectSlice(sliceType, checkbox) {
+            const sliceIds = {
+                'all': 'sliceAll',
+                'low-latency': 'sliceLowLatency',
+                'low-loss': 'sliceLowLoss'
+            };
+
+            if (sliceType !== 'all' && checkbox.checked) {
+                const allCb = document.getElementById(sliceIds['all']);
+                if (allCb && allCb.checked) {
+                    allCb.checked = false;
+                    allCb.closest('.slice-option').classList.remove('active');
+                }
+            }
+
+            if (checkbox.checked) {
+                document.querySelectorAll('.slice-option').forEach(opt => {
+                    if (opt.querySelector('input') !== checkbox) {
+                        opt.querySelector('input').checked = false;
+                        opt.classList.remove('active');
+                    }
+                });
+                checkbox.closest('.slice-option').classList.add('active');
+                currentSlice = sliceType;
+            } else {
+                checkbox.closest('.slice-option').classList.remove('active');
+                const anyChecked = Array.from(document.querySelectorAll('.slice-option input'))
+                    .some(cb => cb.checked);
+                if (!anyChecked) {
+                    const allCb = document.getElementById(sliceIds['all']);
+                    if (allCb) {
+                        allCb.checked = true;
+                        allCb.closest('.slice-option').classList.add('active');
+                        currentSlice = 'all';
+                    }
+                }
+            }
+
+            console.log('Selected slice:', currentSlice);
         }
 
         async function loadMulticastRerouteState() {
@@ -1570,7 +1696,7 @@
                 const response = await fetch('/multicast_reroute');
                 const data = await response.json();
                 document.getElementById('multicastRerouteLabel').textContent =
-                    data.enabled ? 'Multicast Reroute: ON' : 'Multicast Reroute: OFF';
+                    data.enabled ? '组播重路由: 开启' : '组播重路由: 关闭';
                 document.getElementById('multicastRerouteToggle').checked = data.enabled;
             } catch (e) {
                 console.error('Failed to load multicast reroute state:', e);
@@ -1616,7 +1742,7 @@
         }
 
         function showLoading(message) {
-            document.getElementById('loadingText').textContent = message || 'Please wait';
+            document.getElementById('loadingText').textContent = message || '请稍候';
             document.getElementById('loadingOverlay').classList.add('active');
         }
 
@@ -1626,7 +1752,7 @@
 
         async function fetchFlowTable(dpid) {
             const modalBody = document.getElementById('modalBody');
-            modalBody.innerHTML = '<div class="loading">Loading...</div>';
+            modalBody.innerHTML = '<div class="loading">加载中...</div>';
 
             try {
                 const response = await fetch(`/stats/flow/${dpid}`);
@@ -1654,18 +1780,18 @@
 
                 let tableHtml = `
                     <div style="margin-bottom: 12px; color: #79c0ff; font-size: 13px;">
-                        Total: ${flows.length} flow rule(s)
+                        共 ${flows.length} 条流表规则
                     </div>
                     <table class="flow-table">
                         <thead>
                             <tr>
                                 <th>#</th>
-                                <th>Priority</th>
-                                <th>Match</th>
-                                <th>Actions</th>
-                                <th>Duration</th>
-                                <th>Timeouts</th>
-                                <th>Stats</th>
+                                <th>优先级</th>
+                                <th>匹配项</th>
+                                <th>动作</th>
+                                <th>持续时间</th>
+                                <th>超时</th>
+                                <th>统计</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1766,8 +1892,8 @@
                             <td class="match">${matchStr || '-'}</td>
                             <td class="actions">${actionsStr || '-'}</td>
                             <td class="duration">${formatDuration(durationSec)}</td>
-                            <td class="timeouts">idle:${idleTimeout}<br>hard:${hardTimeout}</td>
-                            <td class="stats">pkts:${packetCount}<br>bytes:${formatBytes(byteCount)}</td>
+                            <td class="timeouts">空闲超时:${idleTimeout}<br>硬超时:${hardTimeout}</td>
+                            <td class="stats">包数:${packetCount}<br>字节:${formatBytes(byteCount)}</td>
                         </tr>
                     `;
                 });
@@ -1776,7 +1902,7 @@
                 modalBody.innerHTML = tableHtml;
 
             } catch (error) {
-                modalBody.innerHTML = `<div class="error">Failed to load flow table:<br>${error.message}</div>`;
+                modalBody.innerHTML = `<div class="error">加载流表失败：<br>${error.message}</div>`;
             }
         }
 
@@ -1842,8 +1968,8 @@
                     <div class="switch-item" onclick="openWeightModal()" style="cursor: pointer; border-style: dashed; border-color: #9b59b6;">
                         <div class="switch-icon" style="background:#9b59b6">+</div>
                         <div class="switch-info">
-                            <div class="switch-name">Add New Weight</div>
-                            <div class="switch-dpid">Click to add a new multicast group</div>
+                            <div class="switch-name">新增组播权重</div>
+                            <div class="switch-dpid">点击新增组播组</div>
                         </div>
                     </div>
                 `;
@@ -1858,7 +1984,7 @@
                                 <div class="switch-icon" style="background:#9b59b6">⚙</div>
                                 <div class="switch-info">
                                     <div class="switch-name">${group}</div>
-                                    <div class="switch-dpid">L:${w.latency} B:${w.bandwidth} Loss:${w.loss}</div>
+                                    <div class="switch-dpid">时延:${w.latency} 带宽:${w.bandwidth} 丢包:${w.loss}</div>
                                 </div>
                             </div>
                         `;
@@ -1917,14 +2043,14 @@
         async function saveWeight() {
             const group = document.getElementById('weightGroup').value.trim();
             if (!group) {
-                document.getElementById('weightError').textContent = 'Please enter a multicast group address';
+                document.getElementById('weightError').textContent = '请输入组播组地址';
                 document.getElementById('weightError').style.display = 'block';
                 return;
             }
 
             // Validate multicast address (224.0.0.0 - 239.255.255.255)
             if (!isValidMulticastAddress(group)) {
-                document.getElementById('weightError').textContent = 'Invalid multicast address. Must be in range 224.0.0.0 - 239.255.255.255';
+                document.getElementById('weightError').textContent = '组播地址无效。范围必须在 224.0.0.0 - 239.255.255.255 之间';
                 document.getElementById('weightError').style.display = 'block';
                 return;
             }
@@ -1939,13 +2065,13 @@
 
             // Check if weights are all default (1.0, 1.0, 1.0)
             if (latency === 1.0 && bandwidth === 1.0 && loss === 1.0) {
-                document.getElementById('weightError').textContent = 'Custom weights must be different from default (1.0, 1.0, 1.0)';
+                document.getElementById('weightError').textContent = '自定义权重必须与默认值 (1.0, 1.0, 1.0) 不同';
                 document.getElementById('weightError').style.display = 'block';
                 return;
             }
 
             try {
-                showLoading('Saving multicast weights...');
+                showLoading('正在保存组播权重...');
                 const response = await fetch('/multicast/weights/' + encodeURIComponent(group), {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
@@ -1965,12 +2091,12 @@
                     }, 1000);
                 } else {
                     const data = await response.json();
-                    document.getElementById('weightError').textContent = data.error || 'Failed to save weights';
+                    document.getElementById('weightError').textContent = data.error || '权重保存失败';
                     document.getElementById('weightError').style.display = 'block';
                 }
             } catch (e) {
                 hideLoading();
-                document.getElementById('weightError').textContent = 'Failed to save weights';
+                document.getElementById('weightError').textContent = '权重保存失败';
                 document.getElementById('weightError').style.display = 'block';
             }
         }
@@ -1982,7 +2108,7 @@
             }
 
             try {
-                showLoading('Deleting multicast weight...');
+                showLoading('正在删除组播权重...');
                 const response = await fetch('/multicast/weights/' + encodeURIComponent(currentWeightGroup), {
                     method: 'DELETE'
                 });
@@ -2058,7 +2184,7 @@
 
         async function selectAlgorithm(algorithm) {
             try {
-                showLoading(`Switching to ${algorithm === 'smart' ? 'Smart' : 'Dijkstra'} algorithm...`);
+                showLoading(`正在切换到 ${algorithm === 'smart' ? '智能算法' : '迪杰斯特拉算法'}...`);
                 const response = await fetch('/routing/algorithm', {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
@@ -2096,8 +2222,8 @@
                     <div class="switch-item" onclick="openQosModal()" style="cursor: pointer; border-style: dashed; border-color: #f39c12;">
                         <div class="switch-icon" style="background:#f39c12">+</div>
                         <div class="switch-info">
-                            <div class="switch-name">Add New QoS Rule</div>
-                            <div class="switch-dpid">Click to create a new rule</div>
+                            <div class="switch-name">新增 QoS 规则</div>
+                            <div class="switch-dpid">点击创建新规则</div>
                         </div>
                     </div>
                 `;
@@ -2119,7 +2245,7 @@
                                 <div class="switch-icon" style="background:#f39c12">${guaranteeIcon}</div>
                                 <div class="switch-info">
                                     <div class="switch-name">${rule.name}</div>
-                                    <div class="switch-dpid">${rule.src_ip} → ${rule.dst_ip} | ${rule.protocol} | DSCP:${rule.dscp} | ${rule.guarantee}</div>
+                                    <div class="switch-dpid">${rule.src_ip} → ${rule.dst_ip} | ${rule.protocol} | DSCP:${rule.dscp} | ${({default:'默认', bandwidth:'带宽优先', latency:'时延优先', loss_rate:'丢包率优先', load_balance:'负载均衡', smart_algorithm:'智能算法'})[rule.guarantee] || rule.guarantee}</div>
                                 </div>
                             </div>
                         `;
@@ -2132,7 +2258,7 @@
 
         function openQosModal(ruleId) {
             currentQosRuleId = ruleId || null;
-            document.getElementById('modalQosTitle').textContent = ruleId ? ' - Edit Rule' : ' - New Rule';
+            document.getElementById('modalQosTitle').textContent = ruleId ? ' - 编辑规则' : ' - 新建规则';
             document.getElementById('qosSuccess').style.display = 'none';
             document.getElementById('qosError').style.display = 'none';
             document.getElementById('qosDeleteBtn').style.display = ruleId ? 'inline-block' : 'none';
@@ -2186,7 +2312,7 @@
             const guarantee = document.getElementById('qosGuarantee').value;
 
             if (!srcIp || !dstIp) {
-                document.getElementById('qosError').textContent = 'Please fill in name, source IP, and destination IP';
+                document.getElementById('qosError').textContent = '请填写名称、源 IP 和目的 IP';
                 document.getElementById('qosError').style.display = 'block';
                 return;
             }
@@ -2204,7 +2330,7 @@
             };
 
             try {
-                showLoading('Saving QoS rule...');
+                showLoading('正在保存 QoS 规则...');
                 const url = currentQosRuleId ? `/qos/rules/${currentQosRuleId}` : '/qos/rules';
                 const method = currentQosRuleId ? 'PUT' : 'POST';
 
@@ -2224,12 +2350,12 @@
                     }, 1000);
                 } else {
                     const data = await response.json();
-                    document.getElementById('qosError').textContent = data.error || 'Failed to save QoS rule';
+                    document.getElementById('qosError').textContent = data.error || 'QoS 规则保存失败';
                     document.getElementById('qosError').style.display = 'block';
                 }
             } catch (e) {
                 hideLoading();
-                document.getElementById('qosError').textContent = 'Failed to save QoS rule';
+                document.getElementById('qosError').textContent = 'QoS 规则保存失败';
                 document.getElementById('qosError').style.display = 'block';
             }
         }
@@ -2241,7 +2367,7 @@
             }
 
             try {
-                showLoading('Deleting QoS rule...');
+                showLoading('正在删除 QoS 规则...');
                 const response = await fetch(`/qos/rules/${currentQosRuleId}`, {
                     method: 'DELETE'
                 });
@@ -2603,77 +2729,77 @@
         <div class="qos-modal">
             <div class="qos-modal-header">
                 <div class="qos-modal-title">
-                    QoS Rule Configuration
+                    QoS 规则配置
                     <span id="modalQosTitle"></span>
                 </div>
                 <button class="qos-modal-close" onclick="closeQosModal()">&times;</button>
             </div>
             <div class="qos-modal-body">
                 <div class="qos-form-group">
-                    <label>Rule Name (规则名称)</label>
-                    <input type="text" id="qosName" placeholder="e.g., Video Conference">
+                    <label>规则名称</label>
+                    <input type="text" id="qosName" placeholder="例如：视频会议">
                 </div>
                 <div class="qos-form-row">
                     <div class="qos-form-group">
-                        <label>Source IP (源 IP)</label>
-                        <input type="text" id="qosSrcIp" placeholder="e.g., 10.0.0.1">
+                        <label>源 IP 地址</label>
+                        <input type="text" id="qosSrcIp" placeholder="例如：10.0.0.1">
                     </div>
                     <div class="qos-form-group">
-                        <label>Destination IP (目的 IP)</label>
-                        <input type="text" id="qosDstIp" placeholder="e.g., 10.0.0.2">
+                        <label>目的 IP 地址</label>
+                        <input type="text" id="qosDstIp" placeholder="例如：10.0.0.2">
                     </div>
                 </div>
                 <div class="qos-form-row">
                     <div class="qos-form-group">
-                        <label>Protocol (协议)</label>
+                        <label>协议类型</label>
                         <select id="qosProtocol">
-                            <option value="any">Any</option>
+                            <option value="any">任意</option>
                             <option value="tcp">TCP</option>
                             <option value="udp">UDP</option>
                             <option value="icmp">ICMP</option>
                         </select>
                     </div>
                     <div class="qos-form-group">
-                        <label>DSCP Value (0-63)</label>
+                        <label>DSCP 值 (0-63)</label>
                         <input type="number" id="qosDscp" min="0" max="63" value="0">
-                        <div class="qos-info">IP precedence: Higher = more important</div>
+                        <div class="qos-info">IP 优先级：值越大越重要</div>
                     </div>
                 </div>
                 <div class="qos-form-row">
                     <div class="qos-form-group">
-                        <label>Source Port (源端口, optional)</label>
-                        <input type="number" id="qosSrcPort" min="1" max="65535" placeholder="e.g., 5000">
+                        <label>源端口（可选）</label>
+                        <input type="number" id="qosSrcPort" min="1" max="65535" placeholder="例如：5000">
                     </div>
                     <div class="qos-form-group">
-                        <label>Destination Port (目的端口, optional)</label>
-                        <input type="number" id="qosDstPort" min="1" max="65535" placeholder="e.g., 80">
+                        <label>目的端口（可选）</label>
+                        <input type="number" id="qosDstPort" min="1" max="65535" placeholder="例如：80">
                     </div>
                 </div>
                 <div class="qos-form-row">
                     <div class="qos-form-group">
-                        <label>Priority (优先级 1-1000)</label>
+                        <label>优先级 (1-1000)</label>
                         <input type="number" id="qosPriority" min="1" max="1000" value="100">
-                        <div class="qos-info">Higher = more important</div>
+                        <div class="qos-info">值越大越重要</div>
                     </div>
                     <div class="qos-form-group">
-                        <label>Guarantee Preference (保障偏好)</label>
+                        <label>保障偏好</label>
                         <select id="qosGuarantee">
-                            <option value="default">Default (默认规则)</option>
-                            <option value="bandwidth">Bandwidth (带宽优先)</option>
-                            <option value="latency">Latency (延迟优先)</option>
-                            <option value="loss_rate">Loss Rate (丢包率优先)</option>
-                            <option value="load_balance">Load Balance (负载均衡)</option>
-                            <option value="smart_algorithm">Smart Algorithm (综合考虑)</option>
+                            <option value="default">默认规则</option>
+                            <option value="bandwidth">带宽优先</option>
+                            <option value="latency">时延优先</option>
+                            <option value="loss_rate">丢包率优先</option>
+                            <option value="load_balance">负载均衡</option>
+                            <option value="smart_algorithm">智能算法（综合考虑）</option>
                         </select>
                     </div>
                 </div>
-                <div class="qos-success" id="qosSuccess">QoS rule saved successfully!</div>
-                <div class="qos-error" id="qosError">Failed to save QoS rule</div>
+                <div class="qos-success" id="qosSuccess">QoS 规则保存成功！</div>
+                <div class="qos-error" id="qosError">QoS 规则保存失败</div>
             </div>
             <div class="qos-modal-footer">
-                <button class="btn btn-delete" id="qosDeleteBtn" onclick="deleteQosRule()">Delete</button>
-                <button class="btn btn-cancel" onclick="closeQosModal()">Cancel</button>
-                <button class="btn btn-save" onclick="saveQosRule()">Save</button>
+                <button class="btn btn-delete" id="qosDeleteBtn" onclick="deleteQosRule()">删除</button>
+                <button class="btn btn-cancel" onclick="closeQosModal()">取消</button>
+                <button class="btn btn-save" onclick="saveQosRule()">保存</button>
             </div>
         </div>
     </div>
@@ -2682,38 +2808,38 @@
         <div class="weight-modal">
             <div class="weight-modal-header">
                 <div class="weight-modal-title">
-                    Multicast Weight Settings
+                    组播权重设置
                     <span id="modalWeightGroup"></span>
                 </div>
                 <button class="weight-modal-close" onclick="closeWeightModal()">&times;</button>
             </div>
             <div class="weight-modal-body">
                 <div class="weight-form-group" id="weightGroupInput">
-                    <label>Multicast Group Address (组播组地址)</label>
-                    <input type="text" id="weightGroup" placeholder="e.g., 239.255.255.250">
+                    <label>组播组地址</label>
+                    <input type="text" id="weightGroup" placeholder="例如：239.255.255.250">
                 </div>
                 <div class="weight-form-group">
-                    <label>Latency Weight (延迟权重)</label>
+                    <label>时延权重</label>
                     <input type="number" id="weightLatency" step="0.1" min="0" max="1" value="1.0">
-                    <div class="weight-info">Range: [0, 1]. Higher = prefer low latency paths</div>
+                    <div class="weight-info">取值范围：[0, 1]。值越大越倾向选择低时延路径</div>
                 </div>
                 <div class="weight-form-group">
-                    <label>Bandwidth Weight (带宽权重)</label>
+                    <label>带宽权重</label>
                     <input type="number" id="weightBandwidth" step="0.1" min="0" max="1" value="1.0">
-                    <div class="weight-info">Range: [0, 1]. Higher = prefer high bandwidth paths</div>
+                    <div class="weight-info">取值范围：[0, 1]。值越大越倾向选择高带宽路径</div>
                 </div>
                 <div class="weight-form-group">
-                    <label>Loss Weight (丢包权重)</label>
+                    <label>丢包权重</label>
                     <input type="number" id="weightLoss" step="0.1" min="0" max="1" value="1.0">
-                    <div class="weight-info">Range: [0, 1]. Higher = prefer low loss paths</div>
+                    <div class="weight-info">取值范围：[0, 1]。值越大越倾向选择低丢包率路径</div>
                 </div>
-                <div class="weight-success" id="weightSuccess">Weights saved successfully!</div>
-                <div class="weight-error" id="weightError">Failed to save weights</div>
+                <div class="weight-success" id="weightSuccess">权重保存成功！</div>
+                <div class="weight-error" id="weightError">权重保存失败</div>
             </div>
             <div class="weight-modal-footer">
-                <button class="btn btn-delete" onclick="deleteWeight()">Reset to Default</button>
-                <button class="btn btn-cancel" onclick="closeWeightModal()">Cancel</button>
-                <button class="btn btn-save" onclick="saveWeight()">Save</button>
+                <button class="btn btn-delete" onclick="deleteWeight()">恢复默认值</button>
+                <button class="btn btn-cancel" onclick="closeWeightModal()">取消</button>
+                <button class="btn btn-save" onclick="saveWeight()">保存</button>
             </div>
         </div>
     </div>
