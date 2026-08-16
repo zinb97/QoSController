@@ -20,6 +20,7 @@ from webob import Response
 
 import utils
 from QoSRuleController import QoSRuleController
+from SliceController import SliceController
 from client import RL_multicast_tree
 from utils import WeightPref
 
@@ -126,6 +127,7 @@ class QoSController(app_manager.RyuApp):
         wsgi = kwargs['wsgi']
         wsgi.register(TopologyController, {topology_api_name: self})
         wsgi.register(QoSRuleController, {topology_api_name: self})
+        wsgi.register(SliceController, {topology_api_name: self})
 
         self._topo_thread = hub.spawn(self._topology_loop)
         self._stats_thread = hub.spawn(self._stats_loop)

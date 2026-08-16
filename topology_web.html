@@ -90,6 +90,7 @@
             padding: 16px;
             display: flex;
             flex-direction: column;
+            position: relative;
         }
 
         .canvas-header {
@@ -207,6 +208,33 @@
             border: 1px solid #30363d;
             border-radius: 12px;
             overflow: hidden;
+        }
+
+        .slice-error-overlay {
+            position: absolute;
+            top: 50px;
+            left: 16px;
+            right: 16px;
+            bottom: 16px;
+            background: rgba(22, 27, 34, 0.96);
+            border: 2px dashed #f85149;
+            border-radius: 12px;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+        }
+
+        .slice-error-overlay.active {
+            display: flex;
+        }
+
+        .slice-error-message {
+            color: #f85149;
+            font-size: 28px;
+            font-weight: 600;
+            text-align: center;
+            letter-spacing: 1px;
         }
 
         /* Sidebar */
@@ -684,6 +712,11 @@
                         </label>
                         <div class="slice-divider"></div>
                         <label class="slice-option">
+                            <input type="checkbox" id="sliceBasic" onchange="selectSlice('basic', this)">
+                            <span>基础切片</span>
+                        </label>
+                        <div class="slice-divider"></div>
+                        <label class="slice-option">
                             <input type="checkbox" id="sliceLowLatency" onchange="selectSlice('low-latency', this)">
                             <span>低时延切片</span>
                         </label>
@@ -700,6 +733,9 @@
                 </div>
             </div>
             <div id="mynetwork"></div>
+            <div class="slice-error-overlay" id="sliceErrorOverlay">
+                <div class="slice-error-message">切片获取失败！</div>
+            </div>
         </div>
 
         <aside class="sidebar">
@@ -1650,45 +1686,111 @@
 
         let currentSlice = 'all';
 
-        function selectSlice(sliceType, checkbox) {
+        function showSliceError(message) {
+            const overlay = document.getElementById('sliceErrorOverlay');
+            if (overlay) {
+                overlay.querySelector('.slice-error-message').textContent = message || '切片获取失败！';
+                overlay.classList.add('active');
+            }
+            if (typeof nodes !== 'undefined' && nodes) {
+                nodes.clear();
+            }
+            if (typeof edges !== 'undefined' && edges) {
+                edges.clear();
+            }
+        }
+
+        function hideSliceError() {
+            const overlay = document.getElementById('sliceErrorOverlay');
+            if (overlay) {
+                overlay.classList.remove('active');
+            }
+        }
+
+        async function selectSlice(sliceType, checkbox) {
             const sliceIds = {
                 'all': 'sliceAll',
+                'basic': 'sliceBasic',
                 'low-latency': 'sliceLowLatency',
                 'low-loss': 'sliceLowLoss'
             };
+            const allCb = document.getElementById(sliceIds['all']);
 
-            if (sliceType !== 'all' && checkbox.checked) {
-                const allCb = document.getElementById(sliceIds['all']);
-                if (allCb && allCb.checked) {
-                    allCb.checked = false;
-                    allCb.closest('.slice-option').classList.remove('active');
-                }
+            // 取消勾选"全部" → 强制保持"全部"
+            if (sliceType === 'all' && !checkbox.checked) {
+                checkbox.checked = true;
+                return;
             }
 
-            if (checkbox.checked) {
+            // 取消勾选某个非"全部"切片 → 回退到"全部"
+            if (sliceType !== 'all' && !checkbox.checked) {
+                checkbox.closest('.slice-option').classList.remove('active');
+                if (allCb) {
+                    allCb.checked = true;
+                    allCb.closest('.slice-option').classList.add('active');
+                    currentSlice = 'all';
+                }
+                hideSliceError();
+                updateTopology();
+                console.log('Selected slice:', currentSlice);
+                return;
+            }
+
+            // 勾选"全部" → 纯本地操作
+            if (sliceType === 'all') {
                 document.querySelectorAll('.slice-option').forEach(opt => {
-                    if (opt.querySelector('input') !== checkbox) {
-                        opt.querySelector('input').checked = false;
+                    const cb = opt.querySelector('input');
+                    if (cb !== checkbox) {
+                        cb.checked = false;
                         opt.classList.remove('active');
                     }
                 });
                 checkbox.closest('.slice-option').classList.add('active');
-                currentSlice = sliceType;
-            } else {
-                checkbox.closest('.slice-option').classList.remove('active');
-                const anyChecked = Array.from(document.querySelectorAll('.slice-option input'))
-                    .some(cb => cb.checked);
-                if (!anyChecked) {
-                    const allCb = document.getElementById(sliceIds['all']);
-                    if (allCb) {
-                        allCb.checked = true;
-                        allCb.closest('.slice-option').classList.add('active');
-                        currentSlice = 'all';
-                    }
-                }
+                currentSlice = 'all';
+                hideSliceError();
+                updateTopology();
+                console.log('Selected slice:', currentSlice);
+                return;
             }
 
-            console.log('Selected slice:', currentSlice);
+            // 勾选基础/低时延/低丢包切片 → 先乐观更新 UI，再请求后端
+            const endpointMap = {
+                'basic': '/topology/slice/basic',
+                'low-latency': '/topology/slice/low-latency',
+                'low-loss': '/topology/slice/low-loss'
+            };
+            const endpoint = endpointMap[sliceType];
+
+            if (allCb && allCb.checked) {
+                allCb.checked = false;
+                allCb.closest('.slice-option').classList.remove('active');
+            }
+            document.querySelectorAll('.slice-option').forEach(opt => {
+                const cb = opt.querySelector('input');
+                if (cb !== checkbox && cb !== allCb) {
+                    cb.checked = false;
+                    opt.classList.remove('active');
+                }
+            });
+
+            try {
+                const response = await fetch(endpoint, {method: 'POST'});
+                const data = await response.json();
+                if (data.success) {
+                    checkbox.closest('.slice-option').classList.add('active');
+                    currentSlice = sliceType;
+                    hideSliceError();
+                    console.log('Selected slice:', currentSlice);
+                } else {
+                    showSliceError('切片获取失败！');
+                    console.warn(`Slice switch rejected: ${data.error || '后端拒绝切片切换'}`);
+                    console.log('Selected slice:', currentSlice);
+                }
+            } catch (e) {
+                console.error('Slice switch request failed:', e);
+                showSliceError('切片获取失败！');
+                console.log('Selected slice:', currentSlice);
+            }
         }
 
         async function loadMulticastRerouteState() {
