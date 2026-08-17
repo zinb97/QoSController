@@ -53,3 +53,14 @@ class SliceController(ControllerBase):
             'error': '低丢包切片切换尚未实现'
         }, ensure_ascii=False).encode('utf-8')
         return Response(content_type='application/json; charset=UTF-8', body=body)
+
+    @route('topology', '/topology/slice/low-latency-loss', methods=['POST'])
+    def activate_low_latency_loss_slice(self, req):
+        """切换到低时延-丢包网络切片（占位实现，待后续接入子拓扑生成逻辑）"""
+        self.switch_app.logger.info("[Slice] Request to activate low-latency-loss slice (stub)")
+        body = json.dumps({
+            'success': False,
+            'slice': 'low-latency-loss',
+            'error': '低时延-丢包切片切换尚未实现'
+        }, ensure_ascii=False).encode('utf-8')
+        return Response(content_type='application/json; charset=UTF-8', body=body)

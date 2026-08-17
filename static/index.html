@@ -66,6 +66,11 @@
                             <input type="checkbox" id="sliceLowLoss" onchange="selectSlice('low-loss', this)">
                             <span>低丢包切片</span>
                         </label>
+                        <div class="slice-divider"></div>
+                        <label class="slice-option">
+                            <input type="checkbox" id="sliceLowLatencyLoss" onchange="selectSlice('low-latency-loss', this)">
+                            <span>低时延-丢包切片</span>
+                        </label>
                     </div>
                 </div>
                 <div class="last-update">
@@ -511,6 +516,25 @@
                     <div class="slice-config-form-group">
                         <label>丢包权重阈值</label>
                         <input type="number" id="sliceLowLossThreshold" step="0.1" min="0" max="1" value="1.0">
+                        <div class="slice-config-info">取值 [0, 1]，超过阈值选择低丢包切片路由</div>
+                    </div>
+                </div>
+
+                <div class="slice-config-section">
+                    <div class="slice-config-section-title">低时延-丢包切片</div>
+                    <div class="slice-config-form-group">
+                        <label>所属节点</label>
+                        <input type="text" id="sliceLowLatencyLossNodes" placeholder="例如：s1, s2; s3 或 0x1, 0x2">
+                        <div class="slice-config-info">多个节点用逗号或分号分隔，可输入交换机名或 DPID（十进制/十六进制）</div>
+                    </div>
+                    <div class="slice-config-form-group">
+                        <label>时延权重阈值</label>
+                        <input type="number" id="sliceLowLatencyLossLatencyThreshold" step="0.1" min="0" max="1" value="1.0">
+                        <div class="slice-config-info">取值 [0, 1]，超过阈值选择低时延切片路由</div>
+                    </div>
+                    <div class="slice-config-form-group">
+                        <label>丢包权重阈值</label>
+                        <input type="number" id="sliceLowLatencyLossLossThreshold" step="0.1" min="0" max="1" value="1.0">
                         <div class="slice-config-info">取值 [0, 1]，超过阈值选择低丢包切片路由</div>
                     </div>
                 </div>

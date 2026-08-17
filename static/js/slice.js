@@ -35,7 +35,8 @@ async function selectSlice(sliceType, checkbox) {
         'all': 'sliceAll',
         'basic': 'sliceBasic',
         'low-latency': 'sliceLowLatency',
-        'low-loss': 'sliceLowLoss'
+        'low-loss': 'sliceLowLoss',
+        'low-latency-loss': 'sliceLowLatencyLoss'
     };
     const allCb = document.getElementById(sliceIds['all']);
 
@@ -76,11 +77,12 @@ async function selectSlice(sliceType, checkbox) {
         return;
     }
 
-    // 勾选基础/低时延/低丢包切片 → 先乐观更新 UI，再请求后端
+    // 勾选基础/低时延/低丢包/低时延-丢包切片 → 先乐观更新 UI，再请求后端
     const endpointMap = {
         'basic': '/topology/slice/basic',
         'low-latency': '/topology/slice/low-latency',
-        'low-loss': '/topology/slice/low-loss'
+        'low-loss': '/topology/slice/low-loss',
+        'low-latency-loss': '/topology/slice/low-latency-loss'
     };
     const endpoint = endpointMap[sliceType];
 
@@ -121,7 +123,8 @@ const sliceTypeLabels = {
     'all': '网络总拓扑',
     'basic': '基础切片',
     'low-latency': '低时延切片',
-    'low-loss': '低丢包切片'
+    'low-loss': '低丢包切片',
+    'low-latency-loss': '低时延-丢包切片'
 };
 
 function parseSwitchList(text, switches) {
@@ -158,8 +161,11 @@ function openSliceConfigModal() {
 
     document.getElementById('sliceLowLatencyNodes').value = '';
     document.getElementById('sliceLowLossNodes').value = '';
+    document.getElementById('sliceLowLatencyLossNodes').value = '';
     document.getElementById('sliceLowLatencyThreshold').value = '1.0';
     document.getElementById('sliceLowLossThreshold').value = '1.0';
+    document.getElementById('sliceLowLatencyLossLatencyThreshold').value = '1.0';
+    document.getElementById('sliceLowLatencyLossLossThreshold').value = '1.0';
 
     document.getElementById('modalSliceType').textContent = ' - ' + (sliceTypeLabels[currentSlice] || currentSlice);
     document.getElementById('sliceConfigModal').classList.add('active');
@@ -177,8 +183,11 @@ function showSliceConfigError(msg) {
 async function saveSliceConfig() {
     const lowLatencyText = document.getElementById('sliceLowLatencyNodes').value.trim();
     const lowLossText = document.getElementById('sliceLowLossNodes').value.trim();
+    const lowLatencyLossText = document.getElementById('sliceLowLatencyLossNodes').value.trim();
     const lowLatencyThresholdRaw = document.getElementById('sliceLowLatencyThreshold').value.trim();
     const lowLossThresholdRaw = document.getElementById('sliceLowLossThreshold').value.trim();
+    const lowLatencyLossLatencyRaw = document.getElementById('sliceLowLatencyLossLatencyThreshold').value.trim();
+    const lowLatencyLossLossRaw = document.getElementById('sliceLowLatencyLossLossThreshold').value.trim();
 
     // 1. 所有字段必填
     if (lowLatencyText === '') {
@@ -189,36 +198,63 @@ async function saveSliceConfig() {
         showSliceConfigError('低丢包切片节点不能为空');
         return;
     }
+    if (lowLatencyLossText === '') {
+        showSliceConfigError('低时延-丢包切片节点不能为空');
+        return;
+    }
     if (lowLatencyThresholdRaw === '') {
-        showSliceConfigError('时延权重阈值不能为空');
+        showSliceConfigError('低时延切片时延权重阈值不能为空');
         return;
     }
     if (lowLossThresholdRaw === '') {
-        showSliceConfigError('丢包权重阈值不能为空');
+        showSliceConfigError('低丢包切片丢包权重阈值不能为空');
+        return;
+    }
+    if (lowLatencyLossLatencyRaw === '') {
+        showSliceConfigError('低时延-丢包切片时延权重阈值不能为空');
+        return;
+    }
+    if (lowLatencyLossLossRaw === '') {
+        showSliceConfigError('低时延-丢包切片丢包权重阈值不能为空');
         return;
     }
 
     // 2. 阈值范围校验
     const lowLatencyThreshold = parseFloat(lowLatencyThresholdRaw);
     const lowLossThreshold = parseFloat(lowLossThresholdRaw);
+    const lowLatencyLossLatency = parseFloat(lowLatencyLossLatencyRaw);
+    const lowLatencyLossLoss = parseFloat(lowLatencyLossLossRaw);
     if (isNaN(lowLatencyThreshold) || lowLatencyThreshold < 0 || lowLatencyThreshold > 1) {
-        showSliceConfigError('时延阈值必须在 [0, 1] 之间');
+        showSliceConfigError('低时延切片时延阈值必须在 [0, 1] 之间');
         return;
     }
     if (isNaN(lowLossThreshold) || lowLossThreshold < 0 || lowLossThreshold > 1) {
-        showSliceConfigError('丢包阈值必须在 [0, 1] 之间');
+        showSliceConfigError('低丢包切片丢包阈值必须在 [0, 1] 之间');
+        return;
+    }
+    if (isNaN(lowLatencyLossLatency) || lowLatencyLossLatency < 0 || lowLatencyLossLatency > 1) {
+        showSliceConfigError('低时延-丢包切片时延阈值必须在 [0, 1] 之间');
+        return;
+    }
+    if (isNaN(lowLatencyLossLoss) || lowLatencyLossLoss < 0 || lowLatencyLossLoss > 1) {
+        showSliceConfigError('低时延-丢包切片丢包阈值必须在 [0, 1] 之间');
         return;
     }
 
     // 3. 解析与存在性校验
     const lowLatencyParsed = parseSwitchList(lowLatencyText, cachedSwitches);
     const lowLossParsed = parseSwitchList(lowLossText, cachedSwitches);
+    const lowLatencyLossParsed = parseSwitchList(lowLatencyLossText, cachedSwitches);
     if (lowLatencyParsed.invalid.length > 0) {
         showSliceConfigError(`低时延切片节点不存在：${lowLatencyParsed.invalid.join(', ')}`);
         return;
     }
     if (lowLossParsed.invalid.length > 0) {
         showSliceConfigError(`低丢包切片节点不存在：${lowLossParsed.invalid.join(', ')}`);
+        return;
+    }
+    if (lowLatencyLossParsed.invalid.length > 0) {
+        showSliceConfigError(`低时延-丢包切片节点不存在：${lowLatencyLossParsed.invalid.join(', ')}`);
         return;
     }
 
@@ -231,6 +267,10 @@ async function saveSliceConfig() {
         showSliceConfigError('低丢包切片节点至少需要 2 个');
         return;
     }
+    if (lowLatencyLossParsed.validDpids.length < 2) {
+        showSliceConfigError('低时延-丢包切片节点至少需要 2 个');
+        return;
+    }
 
     const params = {
         low_latency: {
@@ -240,6 +280,11 @@ async function saveSliceConfig() {
         low_loss: {
             nodes: lowLossParsed.validDpids,
             threshold: lowLossThreshold
+        },
+        low_latency_loss: {
+            nodes: lowLatencyLossParsed.validDpids,
+            latency_threshold: lowLatencyLossLatency,
+            loss_threshold: lowLatencyLossLoss
         }
     };
 
