@@ -3,6 +3,7 @@ var network;
 var nodes = new vis.DataSet();
 var edges = new vis.DataSet();
 let lastTopology = "";
+let topologyIntervalId = null;
 let showHosts = true;
 let showBandwidth = false;
 let showDelay = false;
@@ -29,7 +30,7 @@ window.onload = function() {
     loadRoutingAlgorithm();
     loadLinkEventState();
     loadMulticastRerouteState();
-    setInterval(updateTopology, 2000);
+    topologyIntervalId = setInterval(updateTopology, 2000);
     setInterval(updateActiveFlows, 2000);
     setInterval(updateMulticastWeights, 5000);
     setInterval(updateMulticastActiveFlows, 2000);

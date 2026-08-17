@@ -13,13 +13,20 @@ function showSliceError(message) {
     if (typeof edges !== 'undefined' && edges) {
         edges.clear();
     }
+    if (topologyIntervalId !== null) {
+        clearInterval(topologyIntervalId);
+        topologyIntervalId = null;
+    }
 }
 
 function hideSliceError() {
     const overlay = document.getElementById('sliceErrorOverlay');
     if (overlay) {
         overlay.classList.remove('active');
-        lastTopology = '';
+    }
+    lastTopology = '';
+    if (topologyIntervalId === null) {
+        topologyIntervalId = setInterval(updateTopology, 2000);
     }
 }
 
