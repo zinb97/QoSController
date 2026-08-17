@@ -491,8 +491,8 @@
                     <div class="slice-config-section-title">低时延切片</div>
                     <div class="slice-config-form-group">
                         <label>所属节点</label>
-                        <select multiple id="sliceLowLatencyNodes" class="slice-config-multiselect"></select>
-                        <div class="slice-config-info">按住 Ctrl/Cmd 多选交换机节点</div>
+                        <input type="text" id="sliceLowLatencyNodes" placeholder="例如：s1, s2; s3 或 0x1, 0x2">
+                        <div class="slice-config-info">多个节点用逗号或分号分隔，可输入交换机名或 DPID（十进制/十六进制）</div>
                     </div>
                     <div class="slice-config-form-group">
                         <label>时延权重阈值</label>
@@ -505,8 +505,8 @@
                     <div class="slice-config-section-title">低丢包切片</div>
                     <div class="slice-config-form-group">
                         <label>所属节点</label>
-                        <select multiple id="sliceLowLossNodes" class="slice-config-multiselect"></select>
-                        <div class="slice-config-info">按住 Ctrl/Cmd 多选交换机节点</div>
+                        <input type="text" id="sliceLowLossNodes" placeholder="例如：s1, s2; s3 或 0x1, 0x2">
+                        <div class="slice-config-info">多个节点用逗号或分号分隔，可输入交换机名或 DPID（十进制/十六进制）</div>
                     </div>
                     <div class="slice-config-form-group">
                         <label>丢包权重阈值</label>

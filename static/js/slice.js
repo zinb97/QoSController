@@ -124,19 +124,42 @@ const sliceTypeLabels = {
     'low-loss': '低丢包切片'
 };
 
-function populateSliceNodeSelect(selectEl, switches) {
-    selectEl.innerHTML = switches.map(s => {
-        const dpidHex = '0x' + s.dpid.toString(16).padStart(16, '0');
-        return `<option value="${s.dpid}">${s.name} (${dpidHex})</option>`;
-    }).join('');
+function parseSwitchList(text, switches) {
+    const entries = text.split(/[,;]/).map(s => s.trim()).filter(s => s.length > 0);
+    const validDpids = [];
+    const invalid = [];
+    const seen = new Set();
+
+    for (const entry of entries) {
+        let match = null;
+        if (entry.toLowerCase().startsWith('0x')) {
+            const hexStr = entry.slice(2).toLowerCase();
+            match = switches.find(s => s.dpid.toString(16).padStart(16, '0') === hexStr.padStart(16, '0'));
+        } else if (/^\d+$/.test(entry)) {
+            match = switches.find(s => s.dpid.toString() === entry);
+        } else {
+            match = switches.find(s => s.name === entry);
+        }
+
+        if (match && !seen.has(match.dpid)) {
+            validDpids.push(match.dpid);
+            seen.add(match.dpid);
+        } else if (!match) {
+            invalid.push(entry);
+        }
+    }
+
+    return { validDpids, invalid };
 }
 
 function openSliceConfigModal() {
     document.getElementById('sliceConfigSuccess').style.display = 'none';
     document.getElementById('sliceConfigError').style.display = 'none';
 
-    populateSliceNodeSelect(document.getElementById('sliceLowLatencyNodes'), cachedSwitches);
-    populateSliceNodeSelect(document.getElementById('sliceLowLossNodes'), cachedSwitches);
+    document.getElementById('sliceLowLatencyNodes').value = '';
+    document.getElementById('sliceLowLossNodes').value = '';
+    document.getElementById('sliceLowLatencyThreshold').value = '1.0';
+    document.getElementById('sliceLowLossThreshold').value = '1.0';
 
     document.getElementById('modalSliceType').textContent = ' - ' + (sliceTypeLabels[currentSlice] || currentSlice);
     document.getElementById('sliceConfigModal').classList.add('active');
@@ -146,13 +169,9 @@ function closeSliceConfigModal() {
     document.getElementById('sliceConfigModal').classList.remove('active');
 }
 
-function getSelectedNodeDpids(selectEl) {
-    return Array.from(selectEl.selectedOptions).map(opt => parseInt(opt.value));
-}
-
 async function saveSliceConfig() {
-    const lowLatencyNodes = getSelectedNodeDpids(document.getElementById('sliceLowLatencyNodes'));
-    const lowLossNodes = getSelectedNodeDpids(document.getElementById('sliceLowLossNodes'));
+    const lowLatencyText = document.getElementById('sliceLowLatencyNodes').value;
+    const lowLossText = document.getElementById('sliceLowLossNodes').value;
     const lowLatencyThreshold = parseFloat(document.getElementById('sliceLowLatencyThreshold').value);
     const lowLossThreshold = parseFloat(document.getElementById('sliceLowLossThreshold').value);
 
@@ -167,13 +186,29 @@ async function saveSliceConfig() {
         return;
     }
 
+    const lowLatencyParsed = parseSwitchList(lowLatencyText, cachedSwitches);
+    const lowLossParsed = parseSwitchList(lowLossText, cachedSwitches);
+
+    if (lowLatencyParsed.invalid.length > 0) {
+        document.getElementById('sliceConfigError').textContent =
+            `低时延切片节点不存在：${lowLatencyParsed.invalid.join(', ')}`;
+        document.getElementById('sliceConfigError').style.display = 'block';
+        return;
+    }
+    if (lowLossParsed.invalid.length > 0) {
+        document.getElementById('sliceConfigError').textContent =
+            `低丢包切片节点不存在：${lowLossParsed.invalid.join(', ')}`;
+        document.getElementById('sliceConfigError').style.display = 'block';
+        return;
+    }
+
     const params = {
         low_latency: {
-            nodes: lowLatencyNodes,
+            nodes: lowLatencyParsed.validDpids,
             threshold: lowLatencyThreshold
         },
         low_loss: {
-            nodes: lowLossNodes,
+            nodes: lowLossParsed.validDpids,
             threshold: lowLossThreshold
         }
     };

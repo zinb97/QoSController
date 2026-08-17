@@ -887,13 +887,6 @@ body {
     margin-bottom: 12px;
 }
 
-.slice-config-multiselect {
-    height: auto !important;
-    min-height: 120px;
-    max-height: 180px;
-    overflow-y: auto;
-}
-
 .slice-config-form-group {
     margin-bottom: 16px;
 }
