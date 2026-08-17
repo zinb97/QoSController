@@ -2521,7 +2521,7 @@ class TopologyController(ControllerBase):
     @route('topology', '/', methods=['GET'])
     def index(self, req):
         try:
-            html_path = os.path.join(os.path.dirname(__file__), 'topology_web.html')
+            html_path = os.path.join(os.path.dirname(__file__), 'static', 'index.html')
             with open(html_path, 'r', encoding='utf-8') as f:
                 html = f.read()
             return Response(content_type='text/html; charset=UTF-8', body=html.encode('utf-8'))
@@ -2529,15 +2529,28 @@ class TopologyController(ControllerBase):
             error_msg = f"<html><body><h1>Error loading topology page</h1><p>{str(e)}</p></body></html>"
             return Response(content_type='text/html; charset=UTF-8', body=error_msg.encode('utf-8'), status=500)
 
-    @route('topology', '/vis-network.min.js', methods=['GET'])
-    def serve_vis_network(self, req):
+    @route('topology', '/static/{filepath:.*}', methods=['GET'])
+    def static_files(self, req, filepath):
+        """通用静态文件服务（含路径遍历防护）"""
         try:
-            js_path = os.path.join(os.path.dirname(__file__), 'vis-network.min.js')
-            with open(js_path, 'r', encoding='utf-8') as f:
-                js = f.read()
-            return Response(content_type='application/javascript; charset=UTF-8', body=js.encode('utf-8'))
+            base = os.path.realpath(os.path.join(os.path.dirname(__file__), 'static'))
+            target = os.path.realpath(os.path.join(base, filepath))
+            if not target.startswith(base + os.sep) or not os.path.isfile(target):
+                return Response(status=404, body=b'Not Found')
+            ext = os.path.splitext(target)[1].lower()
+            content_type_map = {
+                '.html': 'text/html; charset=UTF-8',
+                '.css': 'text/css; charset=UTF-8',
+                '.js': 'application/javascript; charset=UTF-8',
+                '.json': 'application/json; charset=UTF-8',
+                '.png': 'image/png',
+                '.svg': 'image/svg+xml',
+            }
+            content_type = content_type_map.get(ext, 'application/octet-stream')
+            with open(target, 'rb') as f:
+                content = f.read()
+            return Response(content_type=content_type, body=content)
         except Exception as e:
-            error_msg = f"Error loading vis-network: {str(e)}"
-            return Response(content_type='text/plain; charset=UTF-8', body=error_msg.encode('utf-8'), status=500)
+            return Response(status=500, body=str(e).encode('utf-8'))
 
 

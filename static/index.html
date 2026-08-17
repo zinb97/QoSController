@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>QoS 控制器 - SDN 网络</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/vis-network.min.js"></script>
+</head>
+<body>
+    <header class="header">
+        <div class="logo">
+            <div class="logo-icon">⚡</div>
+            <div class="logo-text">
+                <h1>QoS 控制器</h1>
+                <span>SDN 网络可视化</span>
+            </div>
+        </div>
+        <div class="status-bar">
+            <div class="status-item">
+                <div class="status-dot"></div>
+                <span>控制器已连接</span>
+            </div>
+            <div class="status-item" style="margin-left: 16px;">
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    <input type="checkbox" id="linkEventToggle" checked
+                           onchange="toggleLinkEvent(this.checked)"
+                           style="width: 16px; height: 16px; cursor: pointer;">
+                    <span id="linkEventLabel" style="font-size: 13px;">链路事件: 开启</span>
+                </label>
+            </div>
+            <div class="status-item" style="margin-left: 16px;">
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    <input type="checkbox" id="multicastRerouteToggle"
+                           onchange="toggleMulticastReroute(this.checked)"
+                           style="width: 16px; height: 16px; cursor: pointer;">
+                    <span id="multicastRerouteLabel" style="font-size: 13px;">组播重路由: 关闭</span>
+                </label>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="canvas-container">
+            <div class="canvas-header">
+                <div class="canvas-title">
+                    <span>网络拓扑 (<span id="switchCount">0</span> 台交换机)</span>
+                    <div class="slice-selector">
+                        <span class="slice-label">网络切片</span>
+                        <label class="slice-option active">
+                            <input type="checkbox" id="sliceAll" checked onchange="selectSlice('all', this)">
+                            <span>网络总拓扑</span>
+                        </label>
+                        <div class="slice-divider"></div>
+                        <label class="slice-option">
+                            <input type="checkbox" id="sliceBasic" onchange="selectSlice('basic', this)">
+                            <span>基础切片</span>
+                        </label>
+                        <div class="slice-divider"></div>
+                        <label class="slice-option">
+                            <input type="checkbox" id="sliceLowLatency" onchange="selectSlice('low-latency', this)">
+                            <span>低时延切片</span>
+                        </label>
+                        <div class="slice-divider"></div>
+                        <label class="slice-option">
+                            <input type="checkbox" id="sliceLowLoss" onchange="selectSlice('low-loss', this)">
+                            <span>低丢包切片</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="last-update">
+                    <span>最后更新: <span id="lastUpdate">--:--:--</span></span>
+                    <span class="algo-badge" id="algoBadge">🧠 智能算法</span>
+                </div>
+            </div>
+            <div id="mynetwork"></div>
+            <div class="slice-error-overlay" id="sliceErrorOverlay">
+                <div class="slice-error-message">切片获取失败！</div>
+            </div>
+        </div>
+
+        <aside class="sidebar">
+            <div class="sidebar-section" style="margin-bottom: 12px;">
+                <button onclick="toggleAllSections()" id="toggleAllBtn" style="
+                    width: 100%;
+                    padding: 8px 12px;
+                    background: #30363d;
+                    border: 1px solid #484f58;
+                    border-radius: 6px;
+                    color: #e6edf3;
+                    font-size: 12px;
+                    cursor: pointer;
+                    margin-bottom: 8px;
+                ">全部折叠</button>
+            </div>
+            <div class="sidebar-section" id="routingSection">
+                <div class="section-title" onclick="toggleSection('routingSection')">路由算法</div>
+                <div class="routing-select" style="margin-bottom: 8px;">
+                    <div class="algo-options" id="algoOptions" style="display: flex; flex-direction: column; gap: 6px;">
+                        <div class="algo-option" data-value="smart" onclick="selectAlgorithm('smart')" style="
+                            padding: 10px 12px;
+                            background: #1c2128;
+                            border: 1px solid #30363d;
+                            border-radius: 8px;
+                            cursor: pointer;
+                            transition: all 0.2s;
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                        ">
+                            <span style="font-size: 16px;">🧠</span>
+                            <span style="color: #c9d1d9; font-size: 13px;">智能算法</span>
+                        </div>
+                        <div class="algo-option" data-value="dijkstra" onclick="selectAlgorithm('dijkstra')" style="
+                            padding: 10px 12px;
+                            background: #1c2128;
+                            border: 1px solid #30363d;
+                            border-radius: 8px;
+                            cursor: pointer;
+                            transition: all 0.2s;
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                        ">
+                            <span style="font-size: 16px;">📊</span>
+                            <span style="color: #c9d1d9; font-size: 13px;">迪杰斯特拉算法</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="sidebar-section" id="statsSection">
+                <div class="section-title" onclick="toggleSection('statsSection')">统计信息</div>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="statSwitches">0</div>
+                        <div class="stat-label">交换机</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statHosts">0</div>
+                        <div class="stat-label">主机</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statLinks">0</div>
+                        <div class="stat-label">链路</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section" id="legendSection">
+                <div class="section-title" onclick="toggleSection('legendSection')">图例</div>
+                <div class="legend">
+                    <div class="legend-item">
+                        <div class="legend-color switch"></div>
+                        <span>OpenFlow 交换机</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color host"></div>
+                        <span>主机</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color link"></div>
+                        <span>网络链路</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section" id="levelsSection">
+                <div class="section-title" onclick="toggleSection('levelsSection')">网络层级</div>
+                <div class="legend">
+                    <div class="legend-item">
+                        <div class="legend-color" style="background:#e74c3c"></div>
+                        <span>L1 - 核心层 (Core)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background:#f39c12"></div>
+                        <span>L2 - 汇聚层 (Aggregation)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background:#27ae60"></div>
+                        <span>L3 - 骨干接入 (Backbone Access)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background:#3498db"></div>
+                        <span>L4 - 省网核心 (Province Core)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background:#9b59b6"></div>
+                        <span>L5 - 省网接入 (Province Access)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background:#95a5a6"></div>
+                        <span>L6 - 城域接入 (Metro Access)</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section" id="displaySection">
+                <div class="section-title" onclick="toggleSection('displaySection')">显示选项</div>
+                <div class="toggle-row">
+                    <span class="toggle-label">显示主机</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="showHosts" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">显示带宽</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="showBandwidth">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">显示时延</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="showDelay">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">显示丢包率</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="showLoss">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">显示负载</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="showLoad">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">锁定拓扑</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="fixTopology">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="sidebar-section" id="switchesSection">
+                <div class="section-title" onclick="toggleSection('switchesSection')">交换机列表</div>
+                <div class="switch-list" id="switchList">
+                    <div class="switch-item">
+                        <div class="switch-icon">⬡</div>
+                        <div class="switch-info">
+                            <div class="switch-name">等待数据...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section" id="hostsSection">
+                <div class="section-title" onclick="toggleSection('hostsSection')">主机列表</div>
+                <div class="switch-list" id="hostList">
+                    <div class="host-item">
+                        <div class="host-icon">▣</div>
+                        <div class="host-info">
+                            <div class="host-name">未检测到主机</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section" id="flowsSection">
+                <div class="section-title" onclick="toggleSection('flowsSection')">活跃流表</div>
+                <div class="switch-list" id="flowList">
+                    <div class="switch-item">
+                        <div class="switch-info">
+                            <div class="switch-name">无活跃流</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section" id="multicastSection">
+                <div class="section-title" onclick="toggleSection('multicastSection')">组播权重</div>
+                <div class="switch-list" id="multicastWeightList">
+                    <div class="switch-item">
+                        <div class="switch-info">
+                            <div class="switch-name">加载中...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section" id="qosSection">
+                <div class="section-title" onclick="toggleSection('qosSection')">QoS 规则</div>
+                <div class="switch-list" id="qosRuleList">
+                    <div class="switch-item">
+                        <div class="switch-info">
+                            <div class="switch-name">加载中...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section" id="multicastFlowsSection">
+                <div class="section-title" onclick="toggleSection('multicastFlowsSection')">组播活跃流</div>
+                <div class="switch-list" id="multicastFlowList">
+                    <div class="switch-item">
+                        <div class="switch-info">
+                            <div class="switch-name">加载中...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <!-- Switch Flow Table Modal -->
+    <div class="modal-overlay" id="flowModal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">
+                    交换机流表
+                    <span id="modalSwitchDpid"></span>
+                </div>
+                <div style="display: flex; align-items: center;">
+                    <button class="refresh-btn" onclick="refreshFlowTable()">刷新</button>
+                    <button class="modal-close" onclick="closeFlowModal()">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="modal-overlay" id="loadingOverlay">
+        <div class="modal" style="width: 280px; text-align: center;">
+            <div class="modal-header" style="justify-content: center;">
+                <div class="modal-title">处理中...</div>
+            </div>
+            <div class="modal-body" style="padding: 30px 20px;">
+                <div class="loading-spinner"></div>
+                <div style="margin-top: 20px; color: #c9d1d9; font-size: 14px;" id="loadingText">请稍候</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- QoS Rule Modal -->
+    <div class="qos-modal-overlay" id="qosModal">
+        <div class="qos-modal">
+            <div class="qos-modal-header">
+                <div class="qos-modal-title">
+                    QoS 规则配置
+                    <span id="modalQosTitle"></span>
+                </div>
+                <button class="qos-modal-close" onclick="closeQosModal()">&times;</button>
+            </div>
+            <div class="qos-modal-body">
+                <div class="qos-form-group">
+                    <label>规则名称</label>
+                    <input type="text" id="qosName" placeholder="例如：视频会议">
+                </div>
+                <div class="qos-form-row">
+                    <div class="qos-form-group">
+                        <label>源 IP 地址</label>
+                        <input type="text" id="qosSrcIp" placeholder="例如：10.0.0.1">
+                    </div>
+                    <div class="qos-form-group">
+                        <label>目的 IP 地址</label>
+                        <input type="text" id="qosDstIp" placeholder="例如：10.0.0.2">
+                    </div>
+                </div>
+                <div class="qos-form-row">
+                    <div class="qos-form-group">
+                        <label>协议类型</label>
+                        <select id="qosProtocol">
+                            <option value="any">任意</option>
+                            <option value="tcp">TCP</option>
+                            <option value="udp">UDP</option>
+                            <option value="icmp">ICMP</option>
+                        </select>
+                    </div>
+                    <div class="qos-form-group">
+                        <label>DSCP 值 (0-63)</label>
+                        <input type="number" id="qosDscp" min="0" max="63" value="0">
+                        <div class="qos-info">IP 优先级：值越大越重要</div>
+                    </div>
+                </div>
+                <div class="qos-form-row">
+                    <div class="qos-form-group">
+                        <label>源端口（可选）</label>
+                        <input type="number" id="qosSrcPort" min="1" max="65535" placeholder="例如：5000">
+                    </div>
+                    <div class="qos-form-group">
+                        <label>目的端口（可选）</label>
+                        <input type="number" id="qosDstPort" min="1" max="65535" placeholder="例如：80">
+                    </div>
+                </div>
+                <div class="qos-form-row">
+                    <div class="qos-form-group">
+                        <label>优先级 (1-1000)</label>
+                        <input type="number" id="qosPriority" min="1" max="1000" value="100">
+                        <div class="qos-info">值越大越重要</div>
+                    </div>
+                    <div class="qos-form-group">
+                        <label>保障偏好</label>
+                        <select id="qosGuarantee">
+                            <option value="default">默认规则</option>
+                            <option value="bandwidth">带宽优先</option>
+                            <option value="latency">时延优先</option>
+                            <option value="loss_rate">丢包率优先</option>
+                            <option value="load_balance">负载均衡</option>
+                            <option value="smart_algorithm">智能算法（综合考虑）</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="qos-success" id="qosSuccess">QoS 规则保存成功！</div>
+                <div class="qos-error" id="qosError">QoS 规则保存失败</div>
+            </div>
+            <div class="qos-modal-footer">
+                <button class="btn btn-delete" id="qosDeleteBtn" onclick="deleteQosRule()">删除</button>
+                <button class="btn btn-cancel" onclick="closeQosModal()">取消</button>
+                <button class="btn btn-save" onclick="saveQosRule()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Multicast Weight Modal -->
+    <div class="weight-modal-overlay" id="weightModal">
+        <div class="weight-modal">
+            <div class="weight-modal-header">
+                <div class="weight-modal-title">
+                    组播权重设置
+                    <span id="modalWeightGroup"></span>
+                </div>
+                <button class="weight-modal-close" onclick="closeWeightModal()">&times;</button>
+            </div>
+            <div class="weight-modal-body">
+                <div class="weight-form-group" id="weightGroupInput">
+                    <label>组播组地址</label>
+                    <input type="text" id="weightGroup" placeholder="例如：239.255.255.250">
+                </div>
+                <div class="weight-form-group">
+                    <label>时延权重</label>
+                    <input type="number" id="weightLatency" step="0.1" min="0" max="1" value="1.0">
+                    <div class="weight-info">取值范围：[0, 1]。值越大越倾向选择低时延路径</div>
+                </div>
+                <div class="weight-form-group">
+                    <label>带宽权重</label>
+                    <input type="number" id="weightBandwidth" step="0.1" min="0" max="1" value="1.0">
+                    <div class="weight-info">取值范围：[0, 1]。值越大越倾向选择高带宽路径</div>
+                </div>
+                <div class="weight-form-group">
+                    <label>丢包权重</label>
+                    <input type="number" id="weightLoss" step="0.1" min="0" max="1" value="1.0">
+                    <div class="weight-info">取值范围：[0, 1]。值越大越倾向选择低丢包率路径</div>
+                </div>
+                <div class="weight-success" id="weightSuccess">权重保存成功！</div>
+                <div class="weight-error" id="weightError">权重保存失败</div>
+            </div>
+            <div class="weight-modal-footer">
+                <button class="btn btn-delete" onclick="deleteWeight()">恢复默认值</button>
+                <button class="btn btn-cancel" onclick="closeWeightModal()">取消</button>
+                <button class="btn btn-save" onclick="saveWeight()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts: load in dependency order -->
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/toggles.js"></script>
+    <script src="/static/js/topology.js"></script>
+    <script src="/static/js/slice.js"></script>
+    <script src="/static/js/sidebar.js"></script>
+    <script src="/static/js/modals.js"></script>
+</body>
+</html>
