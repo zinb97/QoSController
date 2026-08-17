@@ -1698,13 +1698,13 @@
             if (typeof edges !== 'undefined' && edges) {
                 edges.clear();
             }
-            lastTopology = '';
         }
 
         function hideSliceError() {
             const overlay = document.getElementById('sliceErrorOverlay');
             if (overlay) {
                 overlay.classList.remove('active');
+                lastTopology = '';
             }
         }
 
