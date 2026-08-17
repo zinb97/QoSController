@@ -169,36 +169,66 @@ function closeSliceConfigModal() {
     document.getElementById('sliceConfigModal').classList.remove('active');
 }
 
-async function saveSliceConfig() {
-    const lowLatencyText = document.getElementById('sliceLowLatencyNodes').value;
-    const lowLossText = document.getElementById('sliceLowLossNodes').value;
-    const lowLatencyThreshold = parseFloat(document.getElementById('sliceLowLatencyThreshold').value);
-    const lowLossThreshold = parseFloat(document.getElementById('sliceLowLossThreshold').value);
+function showSliceConfigError(msg) {
+    document.getElementById('sliceConfigError').textContent = msg;
+    document.getElementById('sliceConfigError').style.display = 'block';
+}
 
+async function saveSliceConfig() {
+    const lowLatencyText = document.getElementById('sliceLowLatencyNodes').value.trim();
+    const lowLossText = document.getElementById('sliceLowLossNodes').value.trim();
+    const lowLatencyThresholdRaw = document.getElementById('sliceLowLatencyThreshold').value.trim();
+    const lowLossThresholdRaw = document.getElementById('sliceLowLossThreshold').value.trim();
+
+    // 1. 所有字段必填
+    if (lowLatencyText === '') {
+        showSliceConfigError('低时延切片节点不能为空');
+        return;
+    }
+    if (lowLossText === '') {
+        showSliceConfigError('低丢包切片节点不能为空');
+        return;
+    }
+    if (lowLatencyThresholdRaw === '') {
+        showSliceConfigError('时延权重阈值不能为空');
+        return;
+    }
+    if (lowLossThresholdRaw === '') {
+        showSliceConfigError('丢包权重阈值不能为空');
+        return;
+    }
+
+    // 2. 阈值范围校验
+    const lowLatencyThreshold = parseFloat(lowLatencyThresholdRaw);
+    const lowLossThreshold = parseFloat(lowLossThresholdRaw);
     if (isNaN(lowLatencyThreshold) || lowLatencyThreshold < 0 || lowLatencyThreshold > 1) {
-        document.getElementById('sliceConfigError').textContent = '时延阈值必须在 [0, 1] 之间';
-        document.getElementById('sliceConfigError').style.display = 'block';
+        showSliceConfigError('时延阈值必须在 [0, 1] 之间');
         return;
     }
     if (isNaN(lowLossThreshold) || lowLossThreshold < 0 || lowLossThreshold > 1) {
-        document.getElementById('sliceConfigError').textContent = '丢包阈值必须在 [0, 1] 之间';
-        document.getElementById('sliceConfigError').style.display = 'block';
+        showSliceConfigError('丢包阈值必须在 [0, 1] 之间');
         return;
     }
 
+    // 3. 解析与存在性校验
     const lowLatencyParsed = parseSwitchList(lowLatencyText, cachedSwitches);
     const lowLossParsed = parseSwitchList(lowLossText, cachedSwitches);
-
     if (lowLatencyParsed.invalid.length > 0) {
-        document.getElementById('sliceConfigError').textContent =
-            `低时延切片节点不存在：${lowLatencyParsed.invalid.join(', ')}`;
-        document.getElementById('sliceConfigError').style.display = 'block';
+        showSliceConfigError(`低时延切片节点不存在：${lowLatencyParsed.invalid.join(', ')}`);
         return;
     }
     if (lowLossParsed.invalid.length > 0) {
-        document.getElementById('sliceConfigError').textContent =
-            `低丢包切片节点不存在：${lowLossParsed.invalid.join(', ')}`;
-        document.getElementById('sliceConfigError').style.display = 'block';
+        showSliceConfigError(`低丢包切片节点不存在：${lowLossParsed.invalid.join(', ')}`);
+        return;
+    }
+
+    // 4. 每个切片节点数 ≥ 2
+    if (lowLatencyParsed.validDpids.length < 2) {
+        showSliceConfigError('低时延切片节点至少需要 2 个');
+        return;
+    }
+    if (lowLossParsed.validDpids.length < 2) {
+        showSliceConfigError('低丢包切片节点至少需要 2 个');
         return;
     }
 
@@ -229,12 +259,10 @@ async function saveSliceConfig() {
             }, 1000);
         } else {
             const data = await response.json();
-            document.getElementById('sliceConfigError').textContent = data.error || '切片配置保存失败';
-            document.getElementById('sliceConfigError').style.display = 'block';
+            showSliceConfigError(data.error || '切片配置保存失败');
         }
     } catch (e) {
         hideLoading();
-        document.getElementById('sliceConfigError').textContent = '切片配置保存失败';
-        document.getElementById('sliceConfigError').style.display = 'block';
+        showSliceConfigError('切片配置保存失败');
     }
 }
