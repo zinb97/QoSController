@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import threading
 import time
@@ -21,6 +21,13 @@ from webob import Response
 import utils
 from QoSRuleController import QoSRuleController
 from SliceController import SliceController
+from StaticController import StaticController
+from TopologyController import TopologyController
+from LinkEventController import LinkEventController
+from MulticastRerouteController import MulticastRerouteController
+from ActiveFlowsController import ActiveFlowsController
+from MulticastWeightsController import MulticastWeightsController
+from RoutingController import RoutingController
 from client import RL_multicast_tree
 from utils import WeightPref
 
@@ -125,7 +132,13 @@ class QoSController(app_manager.RyuApp):
 
         # 注册 Web API
         wsgi = kwargs['wsgi']
+        wsgi.register(StaticController, {topology_api_name: self})
         wsgi.register(TopologyController, {topology_api_name: self})
+        wsgi.register(LinkEventController, {topology_api_name: self})
+        wsgi.register(MulticastRerouteController, {topology_api_name: self})
+        wsgi.register(ActiveFlowsController, {topology_api_name: self})
+        wsgi.register(MulticastWeightsController, {topology_api_name: self})
+        wsgi.register(RoutingController, {topology_api_name: self})
         wsgi.register(QoSRuleController, {topology_api_name: self})
         wsgi.register(SliceController, {topology_api_name: self})
 
@@ -2247,310 +2260,5 @@ class QoSController(app_manager.RyuApp):
 
     def sw_name(self, dpid):
         return f'{self.switch_name.get(f"{dpid:016x}", f"{dpid}")}'
-
-
-# ===================== Web 服务 =====================
-class TopologyController(ControllerBase):
-    def __init__(self, req, link, data, **config):
-        super(TopologyController, self).__init__(req, link, data, **config)
-        self.switch_app = data[topology_api_name]
-
-    @route('topology', '/topology/data', methods=['GET'])
-    def get_topo_data(self, req):
-        body = json.dumps(self.switch_app.topology_data, ensure_ascii=False).encode('utf-8')
-        return Response(content_type='application/json; charset=UTF-8', body=body)
-
-    @route('topology', '/link_event', methods=['GET', 'POST'])
-    def set_link_event(self, req):
-        """获取或设置链路事件处理开关"""
-        if req.method == 'GET':
-            body = json.dumps({'enabled': self.switch_app.link_event_enabled}, ensure_ascii=False).encode('utf-8')
-            return Response(content_type='application/json; charset=UTF-8', body=body)
-        else:
-            try:
-                body = json.loads(req.body.decode('utf-8'))
-                enabled = body.get('enabled', True)
-                self.switch_app.link_event_enabled = enabled
-                response = json.dumps({'success': True, 'enabled': enabled}, ensure_ascii=False).encode('utf-8')
-                return Response(content_type='application/json; charset=UTF-8', body=response)
-            except Exception as e:
-                response = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
-                return Response(content_type='application/json; charset=UTF-8', body=response)
-
-    @route('topology', '/multicast_reroute', methods=['GET', 'POST'])
-    def set_multicast_reroute(self, req):
-        """获取或设置组播组重路由开关"""
-        if req.method == 'GET':
-            body = json.dumps({'enabled': self.switch_app.multicast_reroute_enabled}, ensure_ascii=False).encode('utf-8')
-            return Response(content_type='application/json; charset=UTF-8', body=body)
-        else:
-            try:
-                body = json.loads(req.body.decode('utf-8'))
-                enabled = body.get('enabled', True)
-                self.switch_app.multicast_reroute_enabled = enabled
-                response = json.dumps({'success': True, 'enabled': enabled}, ensure_ascii=False).encode('utf-8')
-                return Response(content_type='application/json; charset=UTF-8', body=response)
-            except Exception as e:
-                response = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
-                return Response(content_type='application/json; charset=UTF-8', body=response)
-
-    @route('topology', '/flows/active', methods=['GET'])
-    def get_active_flows(self, req):
-        """获取所有活跃流"""
-        flows = []
-        for flow_key, flow_info in self.switch_app.active_flows.items():
-            if flow_info.get('type') == 'qos':
-                rule = flow_info.get('rule', {})
-                path_names = [self.switch_app.switch_name.get(f'{p:016x}', f'{p}') for p in flow_info.get('path', [])]
-                flows.append({
-                    'type': 'qos',
-                    'rule_id': flow_info.get('rule_id'),
-                    'name': rule.get('name'),
-                    'src_ip': rule.get('src_ip'),
-                    'dst_ip': rule.get('dst_ip'),
-                    'protocol': rule.get('protocol'),
-                    'dscp': rule.get('dscp'),
-                    'guarantee': rule.get('guarantee'),
-                    'path': path_names,
-                    'path_dpids': [int(p) for p in flow_info.get('path', [])],
-                    'enabled': rule.get('enabled')
-                })
-            else:
-                src_ip, dst_ip = flow_key
-                path_names = [self.switch_app.switch_name.get(f'{p:016x}', f'{p}') for p in flow_info['path']]
-                flows.append({
-                    'type': 'flow',
-                    'src_ip': src_ip,
-                    'dst_ip': dst_ip,
-                    'path': path_names,
-                    'path_dpids': [int(p) for p in flow_info['path']],
-                    'src_host': flow_info['src_host'],
-                    'dst_host': flow_info['dst_host']
-                })
-        body = json.dumps(flows, ensure_ascii=False).encode('utf-8')
-        return Response(content_type='application/json; charset=UTF-8', body=body)
-
-    @route('multicast', '/multicast/active_flows', methods=['GET'])
-    def get_multicast_active_flows(self, req):
-        """获取所有组播活跃流"""
-        flows = []
-        for multicast_addr, flow_info in self.switch_app.multicast_active_flows.items():
-            # path 是 [(dpid1, dpid2), ...] 元组列表，表示边 (from -> to)
-            # 将边列表转换为前端需要的格式：edges = [[from, to], ...]
-            path_edges = [[u, v] for (u, v) in flow_info['path']]
-            # 构建 BFS 顺序的节点列表，用于显示
-            path_dpids = []
-            if flow_info['path']:
-                src_dpid = flow_info['source_dpid']
-                adj = {}
-                for (u, v) in flow_info['path']:
-                    if u not in adj:
-                        adj[u] = []
-                    if v not in adj[u]:
-                        adj[u].append(v)
-                    if v not in adj:
-                        adj[v] = []
-
-                visited = set()
-                queue = [src_dpid]
-                visited.add(src_dpid)
-                while queue:
-                    curr = queue.pop(0)
-                    path_dpids.append(curr)
-                    for nxt in adj.get(curr, []):
-                        if nxt not in visited:
-                            visited.add(nxt)
-                            queue.append(nxt)
-
-            path_names = [self.switch_app.switch_name.get(f'{p:016x}', f'{p}') for p in path_dpids]
-            route_matrix_list = flow_info['route_matrix'].tolist() if hasattr(flow_info['route_matrix'], 'tolist') else flow_info['route_matrix']
-            flows.append({
-                'multicast_addr': multicast_addr,
-                'source_ip': flow_info['source_ip'],
-                'source_dpid': f'{flow_info["source_dpid"]:x}',
-                'source_switch': self.switch_app.switch_name.get(f'{flow_info["source_dpid"]:016x}', f'{flow_info["source_dpid"]:x}'),
-                'member_ips': flow_info['member_ips'],
-                'path': path_names,
-                'path_dpids': path_dpids,
-                'path_edges': path_edges,
-                'route_matrix': route_matrix_list,
-                'installed_time': flow_info['installed_time']
-            })
-        body = json.dumps(flows, ensure_ascii=False).encode('utf-8')
-        return Response(content_type='application/json; charset=UTF-8', body=body)
-
-    @route('multicast', '/multicast/weights', methods=['GET'])
-    def get_all_multicast_weights(self, req):
-        """获取所有组播组的权重配置"""
-        body = json.dumps(self.switch_app.multicast_weights, ensure_ascii=False).encode('utf-8')
-        return Response(content_type='application/json; charset=UTF-8', body=body)
-
-    @route('multicast', '/multicast/weights/{multicast_addr}', methods=['GET'])
-    def get_multicast_weight(self, req, multicast_addr):
-        """获取指定组播组的权重配置"""
-        if multicast_addr in self.switch_app.multicast_weights:
-            weight = self.switch_app.multicast_weights[multicast_addr]
-        else:
-            weight = {'latency': 1.0, 'bandwidth': 1.0, 'loss': 1.0}
-        body = json.dumps(weight, ensure_ascii=False).encode('utf-8')
-        return Response(content_type='application/json; charset=UTF-8', body=body)
-
-    @route('multicast', '/multicast/weights/{multicast_addr}', methods=['PUT', 'POST'])
-    def set_multicast_weight(self, req, multicast_addr):
-        """设置指定组播组的权重配置
-
-        如果设置的权重与原有权重不同，且该组播组满足以下条件：
-        1. 存在源 IP（multicast_sources 中有记录）
-        2. 已安装过流规则（multicast_flow_installed 中有记录）
-
-        则会删除已有的流规则，并使用新权重重新安装流规则。
-        """
-        try:
-            data = json.loads(req.body.decode('utf-8'))
-            latency = float(data.get('latency_weight', 1.0))
-            bandwidth = float(data.get('bandwidth_weight', 1.0))
-            loss = float(data.get('loss_weight', 1.0))
-
-            # 验证权重值在 [0, 1] 范围内
-            if not (0 <= latency <= 1 and 0 <= bandwidth <= 1 and 0 <= loss <= 1):
-                error_msg = json.dumps({'success': False, 'error': 'Weight values must be in range [0, 1]'}, ensure_ascii=False).encode('utf-8')
-                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
-
-            # 构造新权重对象
-            new_weight = {
-                'latency': latency,
-                'bandwidth': bandwidth,
-                'loss': loss
-            }
-
-            # 获取该组播组原有的权重配置（如果存在）
-            old_weight = self.switch_app.multicast_weights.get(multicast_addr)
-
-            # 检查权重是否发生变化
-            weights_changed = (old_weight is None) or (
-                old_weight['latency'] != latency or
-                old_weight['bandwidth'] != bandwidth or
-                old_weight['loss'] != loss
-            )
-
-            # 如果权重发生变化，且组播组已安装流规则，则需要重新安装
-            if weights_changed and multicast_addr in self.switch_app.multicast_flow_installed:
-                # 保存新的权重配置
-                self.switch_app.multicast_weights[multicast_addr] = new_weight
-                self.switch_app.logger.info(f"[Multicast Weights] Set weights for {multicast_addr}: {new_weight}")
-                self.switch_app.logger.info(f"[Multicast Weights] Weight changed for {multicast_addr}, reinstalling flow rules with new weights")
-                # 删除已安装的流规则
-                self.switch_app._delete_multicast_flows(multicast_addr)
-                self.switch_app.multicast_flow_installed.discard(multicast_addr)
-                # 重新安装流规则（使用新权重）
-                self.switch_app._install_multicast_flow_rules(multicast_addr)
-
-            body = json.dumps({'success': True, 'weights': new_weight}, ensure_ascii=False).encode('utf-8')
-            return Response(content_type='application/json; charset=UTF-8', body=body)
-        except Exception as e:
-            error_msg = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
-            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
-
-    @route('multicast', '/multicast/weights/{multicast_addr}', methods=['DELETE'])
-    def delete_multicast_weight(self, req, multicast_addr):
-        """删除指定组播组的权重配置，恢复默认值"""
-        if multicast_addr in self.switch_app.multicast_weights:
-            del self.switch_app.multicast_weights[multicast_addr]
-            self.switch_app.logger.info(f"[Multicast Weights] Deleted weights for {multicast_addr}")
-            body = json.dumps({'success': True}, ensure_ascii=False).encode('utf-8')
-        else:
-            body = json.dumps({'success': False, 'error': 'Group not found'}, ensure_ascii=False).encode('utf-8')
-        return Response(content_type='application/json; charset=UTF-8', body=body)
-
-    @route('routing', '/routing/algorithm', methods=['GET'])
-    def get_routing_algorithm(self, req):
-        """获取当前路由算法配置"""
-        body = json.dumps({'algorithm': self.switch_app.routing_algorithm}, ensure_ascii=False).encode('utf-8')
-        return Response(content_type='application/json; charset=UTF-8', body=body)
-
-    @route('routing', '/routing/algorithm', methods=['PUT', 'POST'])
-    def set_routing_algorithm(self, req):
-        """设置路由算法: 'dijkstra' 或 'smart'"""
-        try:
-            data = json.loads(req.body.decode('utf-8'))
-            algorithm = data.get('algorithm', 'smart')
-            if algorithm not in ['dijkstra', 'smart']:
-                error_msg = json.dumps({'success': False, 'error': 'Invalid algorithm. Must be dijkstra or smart'}, ensure_ascii=False).encode('utf-8')
-                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
-
-            # 如果算法相同，不做处理
-            if self.switch_app.routing_algorithm == algorithm:
-                self.switch_app.logger.info(f"[Routing] Algorithm unchanged ({algorithm}), skipping")
-                body = json.dumps({'success': True, 'algorithm': algorithm, 'reinstalled': [], 'skipped': [], 'unchanged': True}, ensure_ascii=False).encode('utf-8')
-                return Response(content_type='application/json; charset=UTF-8', body=body)
-
-            self.switch_app.routing_algorithm = algorithm
-            self.switch_app.logger.info(f"[Routing] Algorithm changed to: {algorithm}")
-
-            # 重新安装所有组播组的流规则（每个组播组间隔5秒）
-            reinstalled = []
-            skipped = []
-            for multicast_addr in list(self.switch_app.multicast_groups.keys()):
-                # 检查是否有源IP
-                if multicast_addr not in self.switch_app.multicast_sources:
-                    skipped.append({'group': multicast_addr, 'reason': 'no source IP'})
-                    continue
-                # 检查是否有组成员
-                if multicast_addr not in self.switch_app.multicast_groups or not self.switch_app.multicast_groups[multicast_addr]:
-                    skipped.append({'group': multicast_addr, 'reason': 'no members'})
-                    continue
-                # 删除已有的流规则
-                self.switch_app._delete_multicast_flows(multicast_addr)
-                # 重新安装流规则
-                success = self.switch_app._install_multicast_flow_rules(multicast_addr)
-                if success:
-                    reinstalled.append(multicast_addr)
-                else:
-                    skipped.append({'group': multicast_addr, 'reason': 'installation failed'})
-
-                # 每个组播组之间间隔5秒
-                time.sleep(5)
-
-            self.switch_app.logger.info(f"[Routing] Reinstalled {len(reinstalled)} multicast flows, skipped {len(skipped)}")
-            body = json.dumps({'success': True, 'algorithm': algorithm, 'reinstalled': reinstalled, 'skipped': skipped}, ensure_ascii=False).encode('utf-8')
-            return Response(content_type='application/json; charset=UTF-8', body=body)
-        except Exception as e:
-            error_msg = json.dumps({'success': False, 'error': str(e)}, ensure_ascii=False).encode('utf-8')
-            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
-
-    @route('topology', '/', methods=['GET'])
-    def index(self, req):
-        try:
-            html_path = os.path.join(os.path.dirname(__file__), 'static', 'index.html')
-            with open(html_path, 'r', encoding='utf-8') as f:
-                html = f.read()
-            return Response(content_type='text/html; charset=UTF-8', body=html.encode('utf-8'))
-        except Exception as e:
-            error_msg = f"<html><body><h1>Error loading topology page</h1><p>{str(e)}</p></body></html>"
-            return Response(content_type='text/html; charset=UTF-8', body=error_msg.encode('utf-8'), status=500)
-
-    @route('topology', '/static/{filepath:.*}', methods=['GET'])
-    def static_files(self, req, filepath):
-        """通用静态文件服务（含路径遍历防护）"""
-        try:
-            base = os.path.realpath(os.path.join(os.path.dirname(__file__), 'static'))
-            target = os.path.realpath(os.path.join(base, filepath))
-            if not target.startswith(base + os.sep) or not os.path.isfile(target):
-                return Response(status=404, body=b'Not Found')
-            ext = os.path.splitext(target)[1].lower()
-            content_type_map = {
-                '.html': 'text/html; charset=UTF-8',
-                '.css': 'text/css; charset=UTF-8',
-                '.js': 'application/javascript; charset=UTF-8',
-                '.json': 'application/json; charset=UTF-8',
-                '.png': 'image/png',
-                '.svg': 'image/svg+xml',
-            }
-            content_type = content_type_map.get(ext, 'application/octet-stream')
-            with open(target, 'rb') as f:
-                content = f.read()
-            return Response(content_type=content_type, body=content)
-        except Exception as e:
-            return Response(status=500, body=str(e).encode('utf-8'))
 
 
