@@ -150,6 +150,8 @@ function updateSidebar(topo) {
     document.getElementById('statHosts').textContent = topo.hosts.length;
     document.getElementById('switchCount').textContent = topo.switches.length;
 
+    cachedSwitches = topo.switches || [];
+
     const list = document.getElementById('switchList');
     list.innerHTML = topo.switches.map(s => {
         const levelColor = levelColors[s.level] || levelColors[3];

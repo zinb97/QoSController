@@ -297,6 +297,19 @@
                 </div>
             </div>
 
+            <div class="sidebar-section" id="sliceSection">
+                <div class="section-title" onclick="toggleSection('sliceSection')">切片管理</div>
+                <div class="switch-list" id="sliceList">
+                    <div class="switch-item" onclick="openSliceConfigModal()" style="cursor: pointer; border-style: dashed; border-color: #1f6feb;">
+                        <div class="switch-icon" style="background:#1f6feb">⚙</div>
+                        <div class="switch-info">
+                            <div class="switch-name">切片配置</div>
+                            <div class="switch-dpid">点击填写配置参数</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="sidebar-section" id="multicastFlowsSection">
                 <div class="section-title" onclick="toggleSection('multicastFlowsSection')">组播活跃流</div>
                 <div class="switch-list" id="multicastFlowList">
@@ -459,6 +472,55 @@
                 <button class="btn btn-delete" onclick="deleteWeight()">恢复默认值</button>
                 <button class="btn btn-cancel" onclick="closeWeightModal()">取消</button>
                 <button class="btn btn-save" onclick="saveWeight()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Slice Config Modal -->
+    <div class="slice-config-modal-overlay" id="sliceConfigModal">
+        <div class="slice-config-modal">
+            <div class="slice-config-modal-header">
+                <div class="slice-config-modal-title">
+                    切片配置
+                    <span id="modalSliceType" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8b949e; margin-left: 8px;"></span>
+                </div>
+                <button class="slice-config-modal-close" onclick="closeSliceConfigModal()">&times;</button>
+            </div>
+            <div class="slice-config-modal-body">
+                <div class="slice-config-section">
+                    <div class="slice-config-section-title">低时延切片</div>
+                    <div class="slice-config-form-group">
+                        <label>所属节点</label>
+                        <select multiple id="sliceLowLatencyNodes" class="slice-config-multiselect"></select>
+                        <div class="slice-config-info">按住 Ctrl/Cmd 多选交换机节点</div>
+                    </div>
+                    <div class="slice-config-form-group">
+                        <label>时延权重阈值</label>
+                        <input type="number" id="sliceLowLatencyThreshold" step="0.1" min="0" max="1" value="1.0">
+                        <div class="slice-config-info">取值 [0, 1]，值越大越倾向选择低时延路径</div>
+                    </div>
+                </div>
+
+                <div class="slice-config-section">
+                    <div class="slice-config-section-title">低丢包切片</div>
+                    <div class="slice-config-form-group">
+                        <label>所属节点</label>
+                        <select multiple id="sliceLowLossNodes" class="slice-config-multiselect"></select>
+                        <div class="slice-config-info">按住 Ctrl/Cmd 多选交换机节点</div>
+                    </div>
+                    <div class="slice-config-form-group">
+                        <label>丢包权重阈值</label>
+                        <input type="number" id="sliceLowLossThreshold" step="0.1" min="0" max="1" value="1.0">
+                        <div class="slice-config-info">取值 [0, 1]，值越大越倾向选择低丢包率路径</div>
+                    </div>
+                </div>
+
+                <div class="slice-config-success" id="sliceConfigSuccess">切片配置保存成功！</div>
+                <div class="slice-config-error" id="sliceConfigError">切片配置保存失败</div>
+            </div>
+            <div class="slice-config-modal-footer">
+                <button class="btn btn-cancel" onclick="closeSliceConfigModal()">取消</button>
+                <button class="btn btn-save" onclick="saveSliceConfig()">保存</button>
             </div>
         </div>
     </div>

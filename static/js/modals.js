@@ -568,5 +568,18 @@ document.addEventListener('keydown', function(e) {
         if (qm && qm.classList.contains('active')) {
             closeQosModal();
         }
+        const scm = document.getElementById('sliceConfigModal');
+        if (scm && scm.classList.contains('active')) {
+            closeSliceConfigModal();
+        }
     }
 });
+
+const sliceConfigModal = document.getElementById('sliceConfigModal');
+if (sliceConfigModal) {
+    sliceConfigModal.addEventListener('click', function(e) {
+        if (e.target === this) {
+            closeSliceConfigModal();
+        }
+    });
+}

@@ -4,6 +4,7 @@ var nodes = new vis.DataSet();
 var edges = new vis.DataSet();
 let lastTopology = "";
 let topologyIntervalId = null;
+let cachedSwitches = [];
 let showHosts = true;
 let showBandwidth = false;
 let showDelay = false;
