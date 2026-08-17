@@ -19,15 +19,15 @@ from ryu.topology.api import get_switch, get_link, get_host
 from webob import Response
 
 import utils
-from QoSRuleController import QoSRuleController
-from SliceController import SliceController
-from StaticController import StaticController
-from TopologyController import TopologyController
-from LinkEventController import LinkEventController
-from MulticastRerouteController import MulticastRerouteController
-from ActiveFlowsController import ActiveFlowsController
-from MulticastWeightsController import MulticastWeightsController
-from RoutingController import RoutingController
+from controllers.QoSRuleController import QoSRuleController
+from controllers.SliceController import SliceController
+from controllers.StaticController import StaticController
+from controllers.TopologyController import TopologyController
+from controllers.LinkEventController import LinkEventController
+from controllers.MulticastRerouteController import MulticastRerouteController
+from controllers.ActiveFlowsController import ActiveFlowsController
+from controllers.MulticastWeightsController import MulticastWeightsController
+from controllers.RoutingController import RoutingController
 from client import RL_multicast_tree
 from utils import WeightPref
 

@@ -15,7 +15,8 @@ class StaticController(ControllerBase):
     def index(self, req):
         """主页"""
         try:
-            html_path = os.path.join(os.path.dirname(__file__), 'static', 'index.html')
+            project_root = os.path.dirname(os.path.dirname(__file__))
+            html_path = os.path.join(project_root, 'static', 'index.html')
             with open(html_path, 'r', encoding='utf-8') as f:
                 html = f.read()
             return Response(content_type='text/html; charset=UTF-8', body=html.encode('utf-8'))
@@ -27,7 +28,8 @@ class StaticController(ControllerBase):
     def static_files(self, req, filepath):
         """通用静态文件服务（含路径遍历防护）"""
         try:
-            base = os.path.realpath(os.path.join(os.path.dirname(__file__), 'static'))
+            project_root = os.path.dirname(os.path.dirname(__file__))
+            base = os.path.realpath(os.path.join(project_root, 'static'))
             target = os.path.realpath(os.path.join(base, filepath))
             if not target.startswith(base + os.sep) or not os.path.isfile(target):
                 return Response(status=404, body=b'Not Found')
