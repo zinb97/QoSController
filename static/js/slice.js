@@ -104,6 +104,10 @@ async function selectSlice(sliceType, checkbox) {
         if (data.success) {
             checkbox.closest('.slice-option').classList.add('active');
             currentSlice = sliceType;
+            sliceTopology = data.topology;  // 保存切片拓扑数据
+            renderTopology(sliceTopology);
+            updateSidebar(sliceTopology);
+            updateTime();
             hideSliceError();
             console.log('Selected slice:', currentSlice);
         } else {

@@ -8,7 +8,7 @@ def RL_multicast_tree(adjacency_matrix, latency_matrix, bandwidth_matrix, loss_m
                      source_node, destination_group,
                      latency_weight=1.0, bandwidth_weight=1.0, loss_weight=1.0,
                      algorithm_type = "smart",
-                     server_address='192.168.10.21:50051'):
+                     server_address='192.168.10.22:50051'):
     """调用 gRPC 服务构建组播树"""
 
     def unflatten_matrix(flat, size):

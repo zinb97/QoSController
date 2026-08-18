@@ -190,6 +190,19 @@ function updateSidebar(topo) {
 
 async function updateTopology() {
     try {
+        // 如果当前有激活的切片且有切片拓扑数据，使用切片拓扑
+        if (typeof currentSlice !== 'undefined' && currentSlice !== 'all' && sliceTopology) {
+            if (!hasTopologyChanged(sliceTopology)) {
+                updateLinkDataOnly(sliceTopology);
+                return;
+            }
+            renderTopology(sliceTopology);
+            updateSidebar(sliceTopology);
+            updateTime();
+            return;
+        }
+
+        // 否则获取总拓扑
         let res = await fetch('/topology/data');
         let topo = await res.json();
 

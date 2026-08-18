@@ -13,6 +13,7 @@ let showLoad = false;
 let fixTopology = false;
 let currentHosts = [];
 let currentLinks = [];
+let sliceTopology = null;  // 存储切片拓扑数据
 
 // Flow path animation state
 let currentHighlightedPath = null;
