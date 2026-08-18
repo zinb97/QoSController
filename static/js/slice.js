@@ -159,7 +159,13 @@ function parseSwitchList(text, switches) {
     return { validDpids, invalid };
 }
 
-function openSliceConfigModal() {
+async function openSliceConfigModal() {
+    // 切片配置必须在网络总拓扑视图下进行
+    if (currentSlice !== 'all') {
+        alert('切片配置必须在总拓扑视图下进行');
+        return;
+    }
+
     document.getElementById('sliceConfigSuccess').style.display = 'none';
     document.getElementById('sliceConfigError').style.display = 'none';
 
@@ -170,6 +176,37 @@ function openSliceConfigModal() {
     document.getElementById('sliceLowLossThreshold').value = '1.0';
     document.getElementById('sliceLowLatencyLossLatencyThreshold').value = '1.0';
     document.getElementById('sliceLowLatencyLossLossThreshold').value = '1.0';
+
+    // 尝试获取已有配置
+    try {
+        const response = await fetch('/topology/slice/config');
+        const data = await response.json();
+        if (data.success && data.config) {
+            const config = data.config;
+            // DPID 转交换机名称
+            const dpidToName = (dpids) => {
+                return dpids.map(dpid => {
+                    const sw = cachedSwitches.find(s => s.dpid === dpid);
+                    return sw ? sw.name : dpid.toString();
+                }).join(', ');
+            };
+            if (config.low_latency) {
+                document.getElementById('sliceLowLatencyNodes').value = dpidToName(config.low_latency.nodes);
+                document.getElementById('sliceLowLatencyThreshold').value = config.low_latency.threshold;
+            }
+            if (config.low_loss) {
+                document.getElementById('sliceLowLossNodes').value = dpidToName(config.low_loss.nodes);
+                document.getElementById('sliceLowLossThreshold').value = config.low_loss.threshold;
+            }
+            if (config.low_latency_loss) {
+                document.getElementById('sliceLowLatencyLossNodes').value = dpidToName(config.low_latency_loss.nodes);
+                document.getElementById('sliceLowLatencyLossLatencyThreshold').value = config.low_latency_loss.latency_threshold;
+                document.getElementById('sliceLowLatencyLossLossThreshold').value = config.low_latency_loss.loss_threshold;
+            }
+        }
+    } catch (e) {
+        console.error('Failed to load slice config:', e);
+    }
 
     document.getElementById('modalSliceType').textContent = ' - ' + (sliceTypeLabels[currentSlice] || currentSlice);
     document.getElementById('sliceConfigModal').classList.add('active');

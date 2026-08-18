@@ -25,6 +25,22 @@ class SliceController(ControllerBase):
         }, ensure_ascii=False).encode('utf-8')
         return Response(content_type='application/json; charset=UTF-8', body=body)
 
+    @route('topology', '/topology/slice/config', methods=['GET'])
+    def get_slice_config(self, req):
+        """获取切片配置"""
+        slice_config = getattr(self.switch_app, 'slice_config', None)
+        if slice_config is None:
+            body = json.dumps({
+                'success': True,
+                'config': None
+            }, ensure_ascii=False).encode('utf-8')
+        else:
+            body = json.dumps({
+                'success': True,
+                'config': slice_config
+            }, ensure_ascii=False).encode('utf-8')
+        return Response(content_type='application/json; charset=UTF-8', body=body)
+
     @route('topology', '/topology/slice/basic', methods=['POST'])
     def activate_basic_slice(self, req):
         """切换到基础网络切片（占位实现，待后续接入子拓扑生成逻辑）"""
