@@ -41,14 +41,40 @@ class SliceController(ControllerBase):
             }, ensure_ascii=False).encode('utf-8')
         return Response(content_type='application/json; charset=UTF-8', body=body)
 
+    @route('topology', '/topology/slice/config', methods=['DELETE'])
+    def clear_slice_config(self, req):
+        """清空切片配置和生成的邻接矩阵"""
+        self.switch_app.logger.info("[Slice] Request to clear slice config")
+        # 清空切片配置
+        if hasattr(self.switch_app, 'slice_config'):
+            delattr(self.switch_app, 'slice_config')
+        # 清空切片邻接矩阵
+        if hasattr(self.switch_app, 'slice_adj_matrix'):
+            delattr(self.switch_app, 'slice_adj_matrix')
+        body = json.dumps({
+            'success': True
+        }, ensure_ascii=False).encode('utf-8')
+        return Response(content_type='application/json; charset=UTF-8', body=body)
+
     @route('topology', '/topology/slice/basic', methods=['POST'])
     def activate_basic_slice(self, req):
-        """切换到基础网络切片（占位实现，待后续接入子拓扑生成逻辑）"""
-        self.switch_app.logger.info("[Slice] Request to activate basic slice (stub)")
+        """切换到基础网络切片（即全局网络拓扑）"""
+        self.switch_app.logger.info("[Slice] Request to activate basic slice")
+        # 基础切片返回全局网络拓扑
+        slice_topology = self._build_slice_topology('basic')
+        topology_data = getattr(self.switch_app, 'topology_data', None)
+        # slice_topology 在此处仅用于代表切片配置是否存在
+        if slice_topology is None:
+            body = json.dumps({
+                'success': False,
+                'slice': 'basic',
+                'error': '拓扑数据不存在'
+            }, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
         body = json.dumps({
-            'success': False,
+            'success': True,
             'slice': 'basic',
-            'error': '基础切片切换尚未实现'
+            'topology': topology_data
         }, ensure_ascii=False).encode('utf-8')
         return Response(content_type='application/json; charset=UTF-8', body=body)
 
@@ -120,11 +146,13 @@ class SliceController(ControllerBase):
             return None
 
         config_key_map = {
+            'basic': 'basic',
             'low-latency': 'low_latency',
             'low-loss': 'low_loss',
             'low-latency-loss': 'low_latency_loss'
         }
         matrix_key_map = {
+            'basic': 'basic',
             'low-latency': 'low_latency',
             'low-loss': 'low_loss',
             'low-latency-loss': 'low_latency_loss'
@@ -139,7 +167,7 @@ class SliceController(ControllerBase):
         slice_nodes = set(slice_config.get(config_key, {}).get('nodes', []))
         adj_matrix = slice_adj_matrix.get(matrix_key, [])
 
-        if not adj_matrix:
+        if adj_matrix is None or (isinstance(adj_matrix, (list, np.ndarray)) and len(adj_matrix) == 0):
             return None
 
         net_size = len(adj_matrix_nodes)
@@ -148,7 +176,7 @@ class SliceController(ControllerBase):
 
         # 从邻接矩阵中提取切片网络涉及的节点
         slice_network_nodes = set()
-        adj_matrix_np = np.array(adj_matrix)
+        adj_matrix_np = adj_matrix if isinstance(adj_matrix, np.ndarray) else np.array(adj_matrix)
         for i in range(net_size):
             for j in range(net_size):
                 if adj_matrix_np[i, j] > 0:
@@ -249,12 +277,12 @@ class SliceController(ControllerBase):
         graph = getattr(self.switch_app, 'graph', None)
         adj_matrix_nodes = sorted(graph.nodes())
         net_size = len(adj_matrix_nodes)
-        self.switch_app.logger.info(f"[Slice] \: {graph}")
-        self.switch_app.logger.info(f"[Slice] \: {adj_matrix_nodes}")
-        self.switch_app.logger.info(f"[Slice] \: {net_size}")
 
         # 解析并格式化保存切片配置
         self.switch_app.slice_config = {
+            'basic': {
+                'nodes': adj_matrix_nodes
+            },
             'low_latency': {
                 'nodes': data.get('low_latency', {}).get('nodes', []),
                 'threshold': data.get('low_latency', {}).get('threshold', 0.0)
@@ -272,7 +300,7 @@ class SliceController(ControllerBase):
 
         # 初始化四种切片的邻接矩阵
         self.switch_app.slice_adj_matrix = {
-            'basic': np.zeros((net_size, net_size), dtype=np.float32).tolist() if net_size > 0 else [],
+            'basic': nx.to_numpy_array(graph, nodelist=adj_matrix_nodes, dtype=np.float32),
             'low_latency': np.zeros((net_size, net_size), dtype=np.float32).tolist() if net_size > 0 else [],
             'low_loss': np.zeros((net_size, net_size), dtype=np.float32).tolist() if net_size > 0 else [],
             'low_latency_loss': np.zeros((net_size, net_size), dtype=np.float32).tolist() if net_size > 0 else [],
@@ -280,7 +308,6 @@ class SliceController(ControllerBase):
 
         # 如果拓扑存在，生成各切片邻接矩阵
         if graph is not None and net_size > 0:
-            self.switch_app.logger.info(f"[Slice] 1111111111111111111111")
             # 低时延切片：latency_weight=1, bandwidth_weight=0, loss_weight=0
             self.switch_app.slice_adj_matrix['low_latency'] = self._generate_slice_adj_matrix(
                 graph, adj_matrix_nodes, self.switch_app.slice_config['low_latency']['nodes'],

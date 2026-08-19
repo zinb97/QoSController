@@ -216,6 +216,33 @@ function closeSliceConfigModal() {
     document.getElementById('sliceConfigModal').classList.remove('active');
 }
 
+async function clearSliceConfig() {
+    if (!confirm('确定要清空所有切片配置吗？')) {
+        return;
+    }
+    try {
+        const response = await fetch('/topology/slice/config', { method: 'DELETE' });
+        const data = await response.json();
+        if (data.success) {
+            // 清空前端表单
+            document.getElementById('sliceLowLatencyNodes').value = '';
+            document.getElementById('sliceLowLossNodes').value = '';
+            document.getElementById('sliceLowLatencyLossNodes').value = '';
+            document.getElementById('sliceLowLatencyThreshold').value = '1.0';
+            document.getElementById('sliceLowLossThreshold').value = '1.0';
+            document.getElementById('sliceLowLatencyLossLatencyThreshold').value = '1.0';
+            document.getElementById('sliceLowLatencyLossLossThreshold').value = '1.0';
+            // 清空切片拓扑
+            sliceTopology = null;
+            closeSliceConfigModal();
+            alert('切片配置已清空');
+        }
+    } catch (e) {
+        console.error('Failed to clear slice config:', e);
+        alert('清空失败');
+    }
+}
+
 function showSliceConfigError(msg) {
     document.getElementById('sliceConfigError').textContent = msg;
     document.getElementById('sliceConfigError').style.display = 'block';
