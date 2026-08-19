@@ -208,7 +208,6 @@ async function openSliceConfigModal() {
         console.error('Failed to load slice config:', e);
     }
 
-    document.getElementById('modalSliceType').textContent = ' - ' + (sliceTypeLabels[currentSlice] || currentSlice);
     document.getElementById('sliceConfigModal').classList.add('active');
 }
 
