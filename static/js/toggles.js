@@ -86,11 +86,11 @@ function updateAlgorithmUI(algorithm) {
 
     document.querySelectorAll('.algo-option').forEach(el => {
         if (el.dataset.value === algorithm) {
-            el.style.borderColor = '#58a6ff';
-            el.style.background = '#1f2937';
+            el.style.borderColor = '#0969da';
+            el.style.background = '#e8f0fe';
         } else {
-            el.style.borderColor = '#30363d';
-            el.style.background = '#1c2128';
+            el.style.borderColor = '#e0e4e8';
+            el.style.background = '#f8f9fa';
         }
     });
 }

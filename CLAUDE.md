@@ -57,6 +57,18 @@ sudo python netSim_mcast.py -w 3     # 自定义每层节点宽度
 | `POST /stats/flowentry/add` | 添加流表条目 |
 | `DELETE /stats/flowentry/clear/{dpid}` | 清空流表 |
 
+**Slice REST API (网络切片):**
+| 端点 | 说明 |
+|------|------|
+| `GET /topology/slice` | 获取当前生效的切片类型 |
+| `GET /topology/slice/config` | 获取切片配置 |
+| `PUT /topology/slice/config` | 保存切片配置（节点、阈值） |
+| `DELETE /topology/slice/config` | 清空切片配置和邻接矩阵 |
+| `POST /topology/slice/basic` | 切换到基础切片（全局拓扑） |
+| `POST /topology/slice/low-latency` | 切换到低时延切片 |
+| `POST /topology/slice/low-loss` | 切换到低丢包切片 |
+| `POST /topology/slice/low-latency-loss` | 切换到低时延-丢包切片 |
+
 ## 架构
 
 ```
@@ -78,12 +90,32 @@ ofctl_rest.py           # RYU OFCTL REST API（支持 OF 1.0~1.5）
 app/                    # RYU 应用示例集（含 ofctl/ 子模块）
                         # 主要用途：ofctl_rest.py 依赖 app/ofctl/ 提供底层 OpenFlow 操作
 
+controllers/             # REST API 控制器（模块化设计）
+  ├── TopologyController.py  # 拓扑 REST API
+  ├── QoSRuleController.py    # QoS 规则管理
+  ├── SliceController.py      # 网络切片配置与切换
+  ├── RoutingController.py    # 路由策略管理
+  ├── ActiveFlowsController.py # 活跃流查询
+  ├── LinkEventController.py   # 链路事件监控
+  ├── MulticastWeightsController.py  # 组播权重配置
+  └── MulticastRerouteController.py   # 组播重路由
+
 netSim.py               # Mininet 拓扑生成器（单播/组播基础拓扑）
 netSim_mcast.py         # Mininet 组播拓扑生成器（层级化树状结构）
 
 client.py               # 强化学习组播树构建客户端（调用 gRPC 服务构建组播树）
 
-topology_web.html       # 浏览器端拓扑可视化（vis-network，每 2 秒轮询）
+static/                 # Web UI 资源（vis-network，每 2 秒轮询）
+  ├── index.html        # 主页面
+  ├── style.css
+  ├── vis-network.min.js
+  └── js/
+      ├── app.js        # 主应用逻辑
+      ├── topology.js   # 拓扑渲染
+      ├── slice.js      # 网络切片配置
+      ├── modals.js     # 模态框组件
+      ├── sidebar.js    # 侧边栏
+      └── toggles.js    # 开关组件
 
 utils.py                # tc 统计解析工具、OVS 交换机名称映射、DSCP WeightPref 枚举
 

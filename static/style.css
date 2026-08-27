@@ -2,19 +2,20 @@
 
 body {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    background: #0f1419;
-    color: #e6edf3;
+    background: #f5f7fa;
+    color: #1a1a2e;
     min-height: 100vh;
 }
 
 /* Header */
 .header {
-    background: linear-gradient(135deg, #1a1f2e 0%, #0d1117 100%);
-    border-bottom: 1px solid #30363d;
+    background: linear-gradient(135deg, #ffffff 0%, #f0f2f5 100%);
+    border-bottom: 1px solid #e0e4e8;
     padding: 16px 24px;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
 }
 
 .logo {
@@ -37,12 +38,12 @@ body {
 .logo-text h1 {
     font-size: 18px;
     font-weight: 600;
-    color: #f0f6fc;
+    color: #1a1a2e;
 }
 
 .logo-text span {
     font-size: 12px;
-    color: #79c0ff;
+    color: #0969da;
 }
 
 .status-bar {
@@ -55,6 +56,7 @@ body {
     align-items: center;
     gap: 8px;
     font-size: 13px;
+    color: #555;
 }
 
 .status-dot {
@@ -97,7 +99,7 @@ body {
 .canvas-title {
     font-size: 14px;
     font-weight: 500;
-    color: #c9d1d9;
+    color: #444;
     display: flex;
     align-items: center;
     gap: 12px;
@@ -105,7 +107,7 @@ body {
 }
 
 .canvas-title span {
-    color: #79c0ff;
+    color: #0969da;
 }
 
 .slice-selector {
@@ -113,9 +115,10 @@ body {
     align-items: center;
     gap: 6px;
     padding: 4px 6px;
-    background: #161b22;
-    border: 1px solid #30363d;
+    background: #ffffff;
+    border: 1px solid #e0e4e8;
     border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
 }
 
 .slice-option {
@@ -126,42 +129,42 @@ body {
     border-radius: 6px;
     cursor: pointer;
     font-size: 12px;
-    color: #8b949e;
+    color: #666;
     transition: all 0.15s;
     user-select: none;
 }
 
 .slice-option:hover {
-    color: #c9d1d9;
-    background: #21262d;
+    color: #1a1a2e;
+    background: #f0f2f5;
 }
 
 .slice-option input[type="checkbox"] {
     width: 14px;
     height: 14px;
     cursor: pointer;
-    accent-color: #2ea043;
+    accent-color: #238636;
 }
 
 .slice-option.active {
-    color: #f0f6fc;
-    background: #1f6feb22;
-    border: 1px solid #1f6feb55;
+    color: #1a1a2e;
+    background: #e8f0fe;
+    border: 1px solid #b6d4fe;
 }
 
 .slice-option.active input[type="checkbox"] {
-    accent-color: #1f6feb;
+    accent-color: #0969da;
 }
 
 .slice-divider {
     width: 1px;
     height: 16px;
-    background: #30363d;
+    background: #e0e4e8;
 }
 
 .slice-label {
     font-size: 11px;
-    color: #79c0ff;
+    color: #0969da;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -171,7 +174,7 @@ body {
 .last-update {
     font-family: 'JetBrains Mono', monospace;
     font-size: 12px;
-    color: #c9d1d9;
+    color: #666;
     display: flex;
     align-items: center;
     gap: 16px;
@@ -187,19 +190,20 @@ body {
 }
 
 .algo-badge.dijkstra {
-    background: #1f6feb;
+    background: #0969da;
 }
 
 .algo-option:hover {
-    border-color: #484f58 !important;
+    border-color: #ccc !important;
 }
 
 #mynetwork {
     flex: 1;
-    background: #161b22;
-    border: 1px solid #30363d;
+    background: #ffffff;
+    border: 1px solid #e0e4e8;
     border-radius: 12px;
     overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
 }
 
 .slice-error-overlay {
@@ -208,8 +212,8 @@ body {
     left: 16px;
     right: 16px;
     bottom: 16px;
-    background: rgba(22, 27, 34, 0.96);
-    border: 2px dashed #f85149;
+    background: rgba(255, 255, 255, 0.96);
+    border: 2px dashed #da3633;
     border-radius: 12px;
     display: none;
     align-items: center;
@@ -222,7 +226,7 @@ body {
 }
 
 .slice-error-message {
-    color: #f85149;
+    color: #da3633;
     font-size: 28px;
     font-weight: 600;
     text-align: center;
@@ -232,8 +236,8 @@ body {
 /* Sidebar */
 .sidebar {
     width: 280px;
-    background: #161b22;
-    border-left: 1px solid #30363d;
+    background: #ffffff;
+    border-left: 1px solid #e0e4e8;
     padding: 16px;
     overflow-y: auto;
     scrollbar-width: none;
@@ -253,7 +257,7 @@ body {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    color: #79c0ff;
+    color: #0969da;
     margin-bottom: 12px;
     cursor: pointer;
     display: flex;
@@ -263,7 +267,7 @@ body {
 }
 
 .section-title:hover {
-    color: #a5d6ff;
+    color: #0550ae;
 }
 
 .section-title::after {
@@ -296,8 +300,8 @@ body {
 }
 
 .stat-card {
-    background: #1c2128;
-    border: 1px solid #30363d;
+    background: #f8f9fa;
+    border: 1px solid #e0e4e8;
     border-radius: 8px;
     padding: 12px;
 }
@@ -306,12 +310,12 @@ body {
     font-family: 'JetBrains Mono', monospace;
     font-size: 24px;
     font-weight: 500;
-    color: #58a6ff;
+    color: #0969da;
 }
 
 .stat-label {
     font-size: 11px;
-    color: #8b949e;
+    color: #888;
     margin-top: 4px;
 }
 
@@ -323,8 +327,8 @@ body {
 }
 
 .switch-item {
-    background: #1c2128;
-    border: 1px solid #30363d;
+    background: #f8f9fa;
+    border: 1px solid #e0e4e8;
     border-radius: 6px;
     padding: 10px 12px;
     display: flex;
@@ -335,7 +339,7 @@ body {
 .switch-icon {
     width: 28px;
     height: 28px;
-    background: #1f6feb;
+    background: #0969da;
     border-radius: 6px;
     display: flex;
     align-items: center;
@@ -350,13 +354,13 @@ body {
 .switch-name {
     font-size: 13px;
     font-weight: 500;
-    color: #e6edf3;
+    color: #1a1a2e;
 }
 
 .switch-dpid {
     font-family: 'JetBrains Mono', monospace;
     font-size: 11px;
-    color: #9ba4b0;
+    color: #888;
 }
 
 /* Legend */
@@ -371,7 +375,7 @@ body {
     align-items: center;
     gap: 10px;
     font-size: 12px;
-    color: #c9d1d9;
+    color: #444;
 }
 
 .legend-color {
@@ -381,8 +385,8 @@ body {
 }
 
 .legend-color.switch { background: #e74c3c; }
-.legend-color.link { background: #58a6ff; }
-.legend-color.host { background: #2ea043; }
+.legend-color.link { background: #0969da; }
+.legend-color.host { background: #238636; }
 
 /* Toggle Switch */
 .toggle-row {
@@ -394,7 +398,7 @@ body {
 
 .toggle-label {
     font-size: 13px;
-    color: #c9d1d9;
+    color: #444;
 }
 
 .toggle-switch {
@@ -416,7 +420,7 @@ body {
     left: 0;
     right: 0;
     bottom: 0;
-    background: #30363d;
+    background: #ccc;
     border-radius: 22px;
     transition: 0.3s;
 }
@@ -443,8 +447,8 @@ body {
 
 /* Host Item */
 .host-item {
-    background: #1c2128;
-    border: 1px solid #30363d;
+    background: #f8f9fa;
+    border: 1px solid #e0e4e8;
     border-radius: 6px;
     padding: 10px 12px;
     display: flex;
@@ -470,13 +474,13 @@ body {
 .host-name {
     font-size: 13px;
     font-weight: 500;
-    color: #e6edf3;
+    color: #1a1a2e;
 }
 
 .host-ip {
     font-family: 'JetBrains Mono', monospace;
     font-size: 11px;
-    color: #9ba4b0;
+    color: #888;
 }
 
 /* Switch Flow Table Modal */
@@ -487,7 +491,7 @@ body {
     left: 0;
     width: 100%;
     height: 100%;
-    background: rgba(0, 0, 0, 0.7);
+    background: rgba(0, 0, 0, 0.5);
     z-index: 1000;
     justify-content: center;
     align-items: center;
@@ -498,14 +502,15 @@ body {
 }
 
 .modal {
-    background: #1c2128;
-    border: 1px solid #30363d;
+    background: #ffffff;
+    border: 1px solid #e0e4e8;
     border-radius: 12px;
     width: 80%;
     max-width: 900px;
     max-height: 80vh;
     display: flex;
     flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.15);
 }
 
 .modal-header {
@@ -513,26 +518,26 @@ body {
     justify-content: space-between;
     align-items: center;
     padding: 16px 20px;
-    border-bottom: 1px solid #30363d;
+    border-bottom: 1px solid #e0e4e8;
 }
 
 .modal-title {
     font-size: 16px;
     font-weight: 600;
-    color: #f0f6fc;
+    color: #1a1a2e;
 }
 
 .modal-title span {
     font-family: 'JetBrains Mono', monospace;
     font-size: 12px;
-    color: #8b949e;
+    color: #888;
     margin-left: 8px;
 }
 
 .modal-close {
     background: none;
     border: none;
-    color: #8b949e;
+    color: #888;
     font-size: 24px;
     cursor: pointer;
     padding: 0;
@@ -540,7 +545,7 @@ body {
 }
 
 .modal-close:hover {
-    color: #f0f6fc;
+    color: #1a1a2e;
 }
 
 .modal-body {
@@ -559,66 +564,66 @@ body {
 .flow-table th {
     text-align: left;
     padding: 10px 8px;
-    background: #0d1117;
-    color: #8b949e;
+    background: #f8f9fa;
+    color: #666;
     font-weight: 500;
-    border-bottom: 1px solid #30363d;
+    border-bottom: 1px solid #e0e4e8;
     position: sticky;
     top: 0;
 }
 
 .flow-table td {
     padding: 8px;
-    border-bottom: 1px solid #21262d;
-    color: #e6edf3;
+    border-bottom: 1px solid #f0f0f0;
+    color: #1a1a2e;
     vertical-align: top;
 }
 
 .flow-table tr:hover td {
-    background: #161b22;
+    background: #f8f9fa;
 }
 
 .flow-table .priority {
-    color: #58a6ff;
+    color: #0969da;
 }
 
 .flow-table .index {
-    color: #79c0ff;
+    color: #0550ae;
 }
 
 .flow-table .match {
-    color: #a5d6ff;
+    color: #0550ae;
 }
 
 .flow-table .actions {
-    color: #3fb950;
+    color: #238636;
 }
 
 .flow-table .cookie {
-    color: #8b949e;
+    color: #888;
 }
 
 .flow-table .idle-timeout,
 .flow-table .hard-timeout {
-    color: #8b949e;
+    color: #888;
 }
 
 .flow-table .stats {
-    color: #8b949e;
+    color: #888;
 }
 
 .loading {
     text-align: center;
     padding: 40px;
-    color: #8b949e;
+    color: #888;
 }
 
 .loading-spinner {
     width: 50px;
     height: 50px;
     margin: 0 auto;
-    border: 4px solid #30363d;
-    border-top: 4px solid #79c0ff;
+    border: 4px solid #e0e4e8;
+    border-top: 4px solid #0969da;
     border-radius: 50%;
     animation: spin 1s linear infinite;
 }
@@ -631,13 +636,13 @@ body {
 .error {
     text-align: center;
     padding: 40px;
-    color: #f85149;
+    color: #da3633;
 }
 
 .no-flows {
     text-align: center;
     padding: 40px;
-    color: #8b949e;
+    color: #888;
 }
 
 .refresh-btn {
@@ -663,7 +668,7 @@ body {
     left: 0;
     width: 100%;
     height: 100%;
-    background: rgba(0, 0, 0, 0.7);
+    background: rgba(0, 0, 0, 0.5);
     z-index: 1000;
     justify-content: center;
     align-items: center;
@@ -674,11 +679,12 @@ body {
 }
 
 .weight-modal {
-    background: #1c2128;
-    border: 1px solid #30363d;
+    background: #ffffff;
+    border: 1px solid #e0e4e8;
     border-radius: 12px;
     width: 90%;
     max-width: 500px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.15);
 }
 
 .weight-modal-header {
@@ -686,26 +692,26 @@ body {
     justify-content: space-between;
     align-items: center;
     padding: 16px 20px;
-    border-bottom: 1px solid #30363d;
+    border-bottom: 1px solid #e0e4e8;
 }
 
 .weight-modal-title {
     font-size: 16px;
     font-weight: 600;
-    color: #f0f6fc;
+    color: #1a1a2e;
 }
 
 .weight-modal-title span {
     font-family: 'JetBrains Mono', monospace;
     font-size: 12px;
-    color: #8b949e;
+    color: #888;
     margin-left: 8px;
 }
 
 .weight-modal-close {
     background: none;
     border: none;
-    color: #8b949e;
+    color: #888;
     font-size: 24px;
     cursor: pointer;
     padding: 0;
@@ -713,7 +719,7 @@ body {
 }
 
 .weight-modal-close:hover {
-    color: #f0f6fc;
+    color: #1a1a2e;
 }
 
 .weight-modal-body {
@@ -727,29 +733,29 @@ body {
 .weight-form-group label {
     display: block;
     font-size: 12px;
-    color: #8b949e;
+    color: #666;
     margin-bottom: 6px;
 }
 
 .weight-form-group input {
     width: 100%;
     padding: 10px 12px;
-    background: #0d1117;
-    border: 1px solid #30363d;
+    background: #f8f9fa;
+    border: 1px solid #e0e4e8;
     border-radius: 6px;
-    color: #e6edf3;
+    color: #1a1a2e;
     font-family: 'JetBrains Mono', monospace;
     font-size: 14px;
 }
 
 .weight-form-group input:focus {
     outline: none;
-    border-color: #58a6ff;
+    border-color: #0969da;
 }
 
 .weight-info {
     font-size: 11px;
-    color: #8b949e;
+    color: #888;
     margin-top: 4px;
 }
 
@@ -758,7 +764,7 @@ body {
     justify-content: flex-end;
     gap: 12px;
     padding: 16px 20px;
-    border-top: 1px solid #30363d;
+    border-top: 1px solid #e0e4e8;
 }
 
 .btn {
@@ -770,12 +776,12 @@ body {
 }
 
 .btn-cancel {
-    background: #30363d;
-    color: #e6edf3;
+    background: #f0f0f0;
+    color: #1a1a2e;
 }
 
 .btn-cancel:hover {
-    background: #484f58;
+    background: #e0e0e0;
 }
 
 .btn-save {
@@ -793,18 +799,18 @@ body {
 }
 
 .btn-delete:hover {
-    background: #f85149;
+    background: #b91c1c;
 }
 
 .weight-success {
-    color: #3fb950;
+    color: #238636;
     font-size: 12px;
     margin-top: 8px;
     display: none;
 }
 
 .weight-error {
-    color: #f85149;
+    color: #da3633;
     font-size: 12px;
     margin-top: 8px;
     display: none;
@@ -818,7 +824,7 @@ body {
     left: 0;
     width: 100%;
     height: 100%;
-    background: rgba(0, 0, 0, 0.7);
+    background: rgba(0, 0, 0, 0.5);
     z-index: 1000;
     justify-content: center;
     align-items: center;
@@ -829,11 +835,12 @@ body {
 }
 
 .slice-config-modal {
-    background: #1c2128;
-    border: 1px solid #30363d;
+    background: #ffffff;
+    border: 1px solid #e0e4e8;
     border-radius: 12px;
     width: 90%;
     max-width: 500px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.15);
 }
 
 .slice-config-modal-header {
@@ -841,19 +848,19 @@ body {
     justify-content: space-between;
     align-items: center;
     padding: 16px 20px;
-    border-bottom: 1px solid #30363d;
+    border-bottom: 1px solid #e0e4e8;
 }
 
 .slice-config-modal-title {
     font-size: 16px;
     font-weight: 600;
-    color: #f0f6fc;
+    color: #1a1a2e;
 }
 
 .slice-config-modal-close {
     background: none;
     border: none;
-    color: #8b949e;
+    color: #888;
     font-size: 24px;
     cursor: pointer;
     padding: 0;
@@ -861,7 +868,7 @@ body {
 }
 
 .slice-config-modal-close:hover {
-    color: #f0f6fc;
+    color: #1a1a2e;
 }
 
 .slice-config-modal-body {
@@ -871,7 +878,7 @@ body {
 .slice-config-section {
     margin-bottom: 18px;
     padding-bottom: 14px;
-    border-bottom: 1px solid #21262d;
+    border-bottom: 1px solid #f0f0f0;
 }
 
 .slice-config-section:last-of-type {
@@ -883,7 +890,7 @@ body {
 .slice-config-section-title {
     font-size: 13px;
     font-weight: 600;
-    color: #f0f6fc;
+    color: #1a1a2e;
     margin-bottom: 12px;
 }
 
@@ -894,7 +901,7 @@ body {
 .slice-config-form-group label {
     display: block;
     font-size: 12px;
-    color: #8b949e;
+    color: #666;
     margin-bottom: 6px;
 }
 
@@ -902,10 +909,10 @@ body {
 .slice-config-form-group input {
     width: 100%;
     padding: 10px 12px;
-    background: #0d1117;
-    border: 1px solid #30363d;
+    background: #f8f9fa;
+    border: 1px solid #e0e4e8;
     border-radius: 6px;
-    color: #e6edf3;
+    color: #1a1a2e;
     font-family: 'JetBrains Mono', monospace;
     font-size: 14px;
 }
@@ -914,9 +921,15 @@ body {
     cursor: pointer;
 }
 
+.slice-config-form-group select:focus,
+.slice-config-form-group input:focus {
+    outline: none;
+    border-color: #0969da;
+}
+
 .slice-config-info {
     font-size: 11px;
-    color: #8b949e;
+    color: #888;
     margin-top: 4px;
 }
 
@@ -925,18 +938,18 @@ body {
     justify-content: flex-end;
     gap: 12px;
     padding: 16px 20px;
-    border-top: 1px solid #30363d;
+    border-top: 1px solid #e0e4e8;
 }
 
 .slice-config-success {
-    color: #3fb950;
+    color: #238636;
     font-size: 12px;
     margin-top: 8px;
     display: none;
 }
 
 .slice-config-error {
-    color: #f85149;
+    color: #da3633;
     font-size: 12px;
     margin-top: 8px;
     display: none;
@@ -950,7 +963,7 @@ body {
     left: 0;
     width: 100%;
     height: 100%;
-    background: rgba(0, 0, 0, 0.7);
+    background: rgba(0, 0, 0, 0.5);
     z-index: 1000;
     justify-content: center;
     align-items: center;
@@ -961,13 +974,14 @@ body {
 }
 
 .qos-modal {
-    background: #1c2128;
-    border: 1px solid #30363d;
+    background: #ffffff;
+    border: 1px solid #e0e4e8;
     border-radius: 12px;
     width: 90%;
     max-width: 600px;
     max-height: 85vh;
     overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.15);
 }
 
 .qos-modal-header {
@@ -975,19 +989,19 @@ body {
     justify-content: space-between;
     align-items: center;
     padding: 16px 20px;
-    border-bottom: 1px solid #30363d;
+    border-bottom: 1px solid #e0e4e8;
 }
 
 .qos-modal-title {
     font-size: 16px;
     font-weight: 600;
-    color: #f0f6fc;
+    color: #1a1a2e;
 }
 
 .qos-modal-close {
     background: none;
     border: none;
-    color: #8b949e;
+    color: #888;
     font-size: 24px;
     cursor: pointer;
     padding: 0;
@@ -995,7 +1009,7 @@ body {
 }
 
 .qos-modal-close:hover {
-    color: #f0f6fc;
+    color: #1a1a2e;
 }
 
 .qos-modal-body {
@@ -1015,7 +1029,7 @@ body {
 .qos-form-group label {
     display: block;
     font-size: 12px;
-    color: #8b949e;
+    color: #666;
     margin-bottom: 6px;
 }
 
@@ -1023,10 +1037,10 @@ body {
 .qos-form-group select {
     width: 100%;
     padding: 10px 12px;
-    background: #0d1117;
-    border: 1px solid #30363d;
+    background: #f8f9fa;
+    border: 1px solid #e0e4e8;
     border-radius: 6px;
-    color: #e6edf3;
+    color: #1a1a2e;
     font-family: 'JetBrains Mono', monospace;
     font-size: 14px;
 }
@@ -1034,7 +1048,7 @@ body {
 .qos-form-group input:focus,
 .qos-form-group select:focus {
     outline: none;
-    border-color: #58a6ff;
+    border-color: #0969da;
 }
 
 .qos-form-group select {
@@ -1043,7 +1057,7 @@ body {
 
 .qos-info {
     font-size: 11px;
-    color: #8b949e;
+    color: #888;
     margin-top: 4px;
 }
 
@@ -1052,18 +1066,18 @@ body {
     justify-content: flex-end;
     gap: 12px;
     padding: 16px 20px;
-    border-top: 1px solid #30363d;
+    border-top: 1px solid #e0e4e8;
 }
 
 .qos-success {
-    color: #3fb950;
+    color: #238636;
     font-size: 12px;
     margin-top: 8px;
     display: none;
 }
 
 .qos-error {
-    color: #f85149;
+    color: #da3633;
     font-size: 12px;
     margin-top: 8px;
     display: none;
@@ -1074,15 +1088,15 @@ body {
     align-items: center;
     gap: 10px;
     padding: 10px 12px;
-    background: #1c2128;
-    border: 1px solid #30363d;
+    background: #f8f9fa;
+    border: 1px solid #e0e4e8;
     border-radius: 6px;
     margin-bottom: 8px;
     cursor: pointer;
 }
 
 .qos-rule-item:hover {
-    border-color: #58a6ff;
+    border-color: #0969da;
 }
 
 .qos-rule-icon {
@@ -1103,11 +1117,11 @@ body {
 .qos-rule-name {
     font-size: 13px;
     font-weight: 500;
-    color: #e6edf3;
+    color: #1a1a2e;
 }
 
 .qos-rule-details {
     font-family: 'JetBrains Mono', monospace;
     font-size: 11px;
-    color: #9ba4b0;
+    color: #888;
 }
