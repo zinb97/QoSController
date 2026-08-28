@@ -6,6 +6,7 @@ from collections import deque
 
 import networkx as nx
 import numpy as np
+from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -28,10 +29,42 @@ from controllers.MulticastRerouteController import MulticastRerouteController
 from controllers.ActiveFlowsController import ActiveFlowsController
 from controllers.MulticastWeightsController import MulticastWeightsController
 from controllers.RoutingController import RoutingController
+from controllers.MetricsController import MetricsController
 from client import RL_multicast_tree
 from utils import WeightPref
 
 topology_api_name = 'topology_api'
+
+# ==================== Prometheus Metrics ====================
+# 拓扑指标
+qos_switches_count = Gauge('qos_switches_count', 'Number of switches in topology')
+qos_links_count = Gauge('qos_links_count', 'Number of links in topology')
+qos_hosts_count = Gauge('qos_hosts_count', 'Number of hosts in topology')
+
+# 交换机指标
+qos_switch_packet_in = Counter('qos_switch_packet_in_total', 'Total packet-in events', ['dpid'])
+qos_switch_flows_installed = Gauge('qos_switch_flows_installed', 'Number of installed flows', ['dpid'])
+
+# 链路指标
+qos_link_bandwidth_usage = Gauge('qos_link_bandwidth_usage_bits', 'Link bandwidth usage in bits/s', ['src_dpid', 'dst_dpid'])
+qos_link_delay = Gauge('qos_link_delay_ms', 'Link delay in milliseconds', ['src_dpid', 'dst_dpid'])
+qos_link_loss = Gauge('qos_link_loss_percent', 'Link packet loss percentage', ['src_dpid', 'dst_dpid'])
+
+# 网络总带宽指标
+qos_network_total_bandwidth_bits = Gauge('qos_network_total_bandwidth_bits', 'Total network bandwidth usage in bits/s')
+
+# QoS 规则指标
+qos_rules_total = Gauge('qos_rules_total', 'Total number of QoS rules')
+qos_rules_active = Gauge('qos_rules_active', 'Number of active QoS rules')
+
+# 组播指标
+qos_multicast_groups = Gauge('qos_multicast_groups', 'Number of active multicast groups')
+qos_multicast_flows = Gauge('qos_multicast_flows', 'Number of multicast flows installed')
+
+# 控制器性能指标
+qos_controller_uptime = Gauge('qos_controller_uptime_seconds', 'Controller uptime in seconds')
+qos_topology_updates_total = Counter('qos_topology_updates_total', 'Total topology updates')
+qos_topology_update_duration = Histogram('qos_topology_update_duration_seconds', 'Topology update duration')
 
 
 class QoSController(app_manager.RyuApp):
@@ -141,6 +174,7 @@ class QoSController(app_manager.RyuApp):
         wsgi.register(RoutingController, {topology_api_name: self})
         wsgi.register(QoSRuleController, {topology_api_name: self})
         wsgi.register(SliceController, {topology_api_name: self})
+        wsgi.register(MetricsController, {topology_api_name: self})
 
         self._topo_thread = hub.spawn(self._topology_loop)
         self._stats_thread = hub.spawn(self._stats_loop)
@@ -153,6 +187,7 @@ class QoSController(app_manager.RyuApp):
             try:
                 with self._lock:
                     self.update_topology()
+                    self._update_prometheus_metrics()
             except Exception as e:
                 self.logger.warning(f"Topology loop update failed: {e}")
             hub.sleep(3)
@@ -1343,6 +1378,9 @@ class QoSController(app_manager.RyuApp):
         if eth.ethertype in (ether.ETH_TYPE_LLDP, ether.ETH_TYPE_IPV6):
             return
 
+        # 更新 Prometheus packet-in 指标
+        qos_switch_packet_in.labels(dpid=self.sw_name(datapath.id)).inc()
+
         arp_pkt = pkt.get_protocol(arp.arp)
         ipv4_pkt = pkt.get_protocol(ipv4.ipv4)
 
@@ -2257,6 +2295,44 @@ class QoSController(app_manager.RyuApp):
             match=match
         )
         datapath.send_msg(req)
+
+    def _update_prometheus_metrics(self):
+        """更新 Prometheus 指标"""
+        # 更新控制器运行时间
+        qos_controller_uptime.set(time.time() - self._start_time)
+        qos_topology_updates_total.inc()
+
+        # 更新拓扑指标
+        qos_switches_count.set(self.graph.number_of_nodes())
+        qos_links_count.set(self.graph.number_of_edges())
+        qos_hosts_count.set(len(self.hosts))
+
+        # 更新链路指标
+        total_bandwidth = 0
+        for src, dst, attrs in self.graph.edges(data=True):
+            src_name = self.sw_name(src)
+            dst_name = self.sw_name(dst)
+            link_bandwidth = attrs.get('total_bps', 0)  # Mbps
+            qos_link_bandwidth_usage.labels(src_dpid=src_name, dst_dpid=dst_name).set(link_bandwidth)
+            qos_link_delay.labels(src_dpid=src_name, dst_dpid=dst_name).set(attrs.get('delay', 0))
+            qos_link_loss.labels(src_dpid=src_name, dst_dpid=dst_name).set(attrs.get('loss', 0))
+            total_bandwidth += link_bandwidth
+
+        # 更新网络总带宽指标
+        qos_network_total_bandwidth_bits.set(total_bandwidth)
+
+        # 更新 QoS 规则指标
+        qos_rules_total.set(len(self.qos_rules))
+        qos_rules_active.set(sum(1 for r in self.qos_rules.values() if r.get('enabled', True)))
+
+        # 更新组播指标
+        qos_multicast_groups.set(len(self.multicast_groups))
+        qos_multicast_flows.set(len(self.multicast_flows))
+
+        # 更新交换机流表数量指标
+        for dpid in self.datapaths:
+            flow_count = sum(1 for flows in self.flow_stats.get(dpid, {}).values())
+            qos_switch_flows_installed.labels(dpid=self.sw_name(dpid)).set(flow_count)
 
     def sw_name(self, dpid):
         return f'{self.switch_name.get(f"{dpid:016x}", f"{dpid}")}'
