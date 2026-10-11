@@ -69,6 +69,41 @@ sudo python netSim_mcast.py -w 3     # 自定义每层节点宽度
 | `POST /topology/slice/low-loss` | 切换到低丢包切片 |
 | `POST /topology/slice/low-latency-loss` | 切换到低时延-丢包切片 |
 
+**Multicast REST API (组播):**
+| 端点 | 说明 |
+|------|------|
+| `GET /multicast/active_flows` | 所有组播活跃流（含源 DPID、组成员、路径、route_matrix） |
+| `GET /multicast/weights` | 所有组播组的权重配置（latency/bandwidth/loss） |
+| `GET /multicast/weights/{addr}` | 指定组播组的权重（缺省返回全 1.0 默认值） |
+| `PUT/POST /multicast/weights/{addr}` | 设置权重；值变更且已安装流规则时自动重装 |
+| `DELETE /multicast/weights/{addr}` | 删除权重配置，恢复默认 |
+
+**Routing REST API (路由算法):**
+| 端点 | 说明 |
+|------|------|
+| `GET /routing/algorithm` | 获取当前组播路由算法（`dijkstra` 或 `smart`） |
+| `PUT/POST /routing/algorithm` | 设置算法；变更后自动重装所有已安装的组播流 |
+
+**Toggle REST API (运行时开关):**
+| 端点 | 说明 |
+|------|------|
+| `GET /link_event` | 获取链路事件处理开关状态 |
+| `POST /link_event` | 设置链路事件开关（body: `{"enabled": true/false}`） |
+| `GET /multicast_reroute` | 获取组播组重路由开关状态 |
+| `POST /multicast_reroute` | 设置组播重路由开关 |
+
+**QoS 规则单条操作：**
+| 端点 | 说明 |
+|------|------|
+| `GET /qos/rules/{rule_id}` | 获取单条 QoS 规则详情 |
+| `PUT/POST /qos/rules/{rule_id}` | 更新单条规则（src_port/dst_port/enabled/priority 等） |
+
+**静态文件：**
+| 端点 | 说明 |
+|------|------|
+| `GET /` | 主页（`static/index.html`） |
+| `GET /static/{filepath:.*}` | 静态资源（含路径遍历防护） |
+
 **Prometheus Metrics:**
 | 端点 | 说明 |
 |------|------|
@@ -90,16 +125,28 @@ sudo python netSim_mcast.py -w 3     # 自定义每层节点宽度
 ## 架构
 
 ```
-QoSController.py       # RYU SDN 控制器（单文件）
-  ├── QoSController      # 主应用类（OpenFlow 1.3）
-  │   ├── MAC/IP 学习（packet-in 时学习源 MAC/IP）
-  │   ├── packet-in 事件处理（二层转发+流表下发）
-  │   ├── 拓扑发现（EventSwitchEnter, EventLinkAdd, EventHostAdd）
-  │   ├── 最短路径计算（BFS/Dijkstra，详见 DSCP 路由策略）
-  │   ├── ARP 代理处理
-  │   └── 组播组管理（IGMP 加入/离开，UDP 组播流规则安装）
-  ├── TopologyController # REST API 控制器（Web 可视化）
-  └── QoSRuleController   # REST API 控制器（QoS 规则管理）
+QoSController.py       # RYU SDN 控制器主类（单文件，~2340 行）
+  └── QoSController      # 主应用类（OpenFlow 1.3）
+      ├── MAC/IP 学习（packet-in 时学习源 MAC/IP）
+      ├── packet-in 事件处理（二层转发+流表下发）
+      ├── 拓扑发现（EventSwitchEnter, EventLinkAdd, EventHostAdd）
+      ├── 最短路径计算（get_shortest_path，详见 guarantee 路由策略）
+      ├── ARP 代理处理
+      ├── 组播组管理（IGMP 加入/离开，UDP 组播流规则安装）
+      └── 后台 hub 线程（每 3s 拓扑刷新 / 每 2s 端口统计 / 组播负载 / 链路负载 / 组播重路由）
+
+controllers/             # REST API 控制器（模块化设计，独立 WSGI ControllerBase）
+  ├── StaticController.py      # 主页 + /static/* 静态文件服务（含路径遍历防护）
+  │                             # 注意：文件名虽叫 StaticController，但内部类名也叫 TopologyController（命名冲突）
+  ├── TopologyController.py    # GET /topology/data（拓扑 JSON）
+  ├── MetricsController.py     # GET /metrics（Prometheus 导出）
+  ├── LinkEventController.py   # GET/POST /link_event（链路事件处理开关）
+  ├── MulticastRerouteController.py # GET/POST /multicast_reroute（组播重路由开关）
+  ├── MulticastWeightsController.py # GET/PUT/DELETE /multicast/weights[/{addr}]（组播权重配置）
+  ├── ActiveFlowsController.py # GET /flows/active + GET /multicast/active_flows
+  ├── RoutingController.py     # GET/PUT /routing/algorithm（dijkstra/smart）
+  ├── QoSRuleController.py     # /qos/rules CRUD
+  └── SliceController.py       # /topology/slice* 配置与切换
 
 ofctl_rest.py           # RYU OFCTL REST API（支持 OF 1.0~1.5）
                         # 提供流表、端口、Meter、Group 等管理接口
@@ -107,16 +154,6 @@ ofctl_rest.py           # RYU OFCTL REST API（支持 OF 1.0~1.5）
 
 app/                    # RYU 应用示例集（含 ofctl/ 子模块）
                         # 主要用途：ofctl_rest.py 依赖 app/ofctl/ 提供底层 OpenFlow 操作
-
-controllers/             # REST API 控制器（模块化设计）
-  ├── TopologyController.py  # 拓扑 REST API
-  ├── QoSRuleController.py    # QoS 规则管理
-  ├── SliceController.py      # 网络切片配置与切换
-  ├── RoutingController.py    # 路由策略管理
-  ├── ActiveFlowsController.py # 活跃流查询
-  ├── LinkEventController.py   # 链路事件监控
-  ├── MulticastWeightsController.py  # 组播权重配置
-  └── MulticastRerouteController.py   # 组播重路由
 
 netSim.py               # Mininet 拓扑生成器（单播/组播基础拓扑）
 netSim_mcast.py         # Mininet 组播拓扑生成器（层级化树状结构）
@@ -149,15 +186,24 @@ multicast_pb2.py        # gRPC protobuf stub
 multicast_pb2_grpc.py  # gRPC RPC 存根
 ```
 
-## DSCP 路由策略
+## 路由策略（QoS 规则 `guarantee` 字段）
 
-| DSCP值 | 路由策略 | 说明 |
-|--------|----------|------|
-| 0/未设置 | 最短跳数 | hop count（默认） |
-| 1 | 带宽优先 | max-bw，选取带宽最大的路径 |
-| 2 | 丢包率优先 | min-loss，选取丢包率最低的路径 |
-| 4 | 负载均衡 | min-load，选取剩余带宽最大的路径 |
-| 8 | 延迟优先 | min-delay，选取总延迟最小的路径 |
+QoS 规则创建时通过 `guarantee` 字段指定路由策略，映射到 `utils.WeightPref` 枚举：
+
+| guarantee 值 | WeightPref | 策略 |
+|--------------|------------|------|
+| `default` | Default | hop count（默认，最短跳数） |
+| `bandwidth` | Bandwidth | max-bw，选取带宽最大的路径 |
+| `latency` | Latency | min-delay，选取总延迟最小的路径 |
+| `loss_rate` | LossRate | min-loss，选取丢包率最低的路径 |
+| `load_balance` | LoadBalance | min-load，选取剩余带宽最大的路径（后台每 2s 检测链路负载并自动重路由） |
+| `smart_algorithm` | SmartAlgorithm | 调用 gRPC `RL_multicast_tree` 服务计算智能路径 |
+
+> 注：原始文档中的 DSCP 值（0/1/2/4/8）已被 `guarantee` 字段取代。`dscp` 字段仍作为 OpenFlow 匹配条件之一保留（0-63），但不再决定路由选择。
+
+**组播路由算法**（独立配置，通过 `/routing/algorithm` 切换）：
+- `smart`（默认）：调用 gRPC 服务构建组播树
+- `dijkstra`：本地 Dijkstra 算法
 
 ## DPID 规范（ChinaBackboneTopo）
 
@@ -189,11 +235,20 @@ DPID 为 16 进制 8 字节，格式：`00000000{L1}{L2:02x}0001`
 ## 实现细节
 
 - **OpenFlow 1.3**：RYU 与交换机通信使用 OF 1.3 协议
-- **gRPC 服务**：RL_multicast_tree 客户端连接 `192.168.10.21:50051`（可配置）构建组播树
+- **gRPC 组播树服务**：`client.RL_multicast_tree()` 连接外部服务（默认 `192.168.10.22:50051`，可在 `client.py:11` 改 `server_address`）。智能路由（`smart` 算法 + `smart_algorithm` guarantee）依赖此服务；**服务不可达将导致组播流安装失败**。
 - **LLDP 拓扑发现**：需要 `--observe-links` 参数启用
 - **MAC 学习**：packet-in 时学习源 MAC，生成流表实现线速转发
 - **Web 轮询**：UI 每 2 秒轮询 `/topology/data` 更新拓扑
 - **Mininet**：必须运行在 Linux 并具有 sudo 权限
+- **后台线程**：`QoSController.__init__` 通过 `hub.spawn` 启动 5 个常驻循环：
+  - `_topology_loop` (3s)：刷新 `topology_data` 并更新 Prometheus 指标
+  - `_stats_loop` (2s)：请求端口/流统计；触发 `load_balance` 类型规则的自动重路由
+  - `_multicast_load_loop`：组播组负载统计与高负载标记
+  - `_link_load_thread`：链路负载与高负载计数
+  - `_reroute_multicast_loop`：根据链路抖动自动重路由组播流（受 `multicast_reroute_enabled` 开关控制）
+- **链路抖动去抖**：`_link_delete_delay = 0.01s` 延迟后删除链路，避免 LLDP 抖动导致频繁重路由
+- **静默 WSGI 日志**：`hub.WSGIServer.serve_forever` 被 monkey-patch 为静默输出，避免 HTTP 访问日志淹没 topology 线程日志
+- **类名陷阱**：`controllers/StaticController.py` 内定义的类实际叫 `TopologyController`（与 `controllers/TopologyController.py` 中的同名类冲突）。修改此类时需谨慎区分文件与类名。
 
 ### metrics可用指标:
 
