@@ -77,7 +77,6 @@ class ActiveFlowsController(ControllerBase):
                             queue.append(nxt)
 
             path_names = [self.switch_app.switch_name.get(f'{p:016x}', f'{p}') for p in path_dpids]
-            route_matrix_list = flow_info['route_matrix'].tolist() if hasattr(flow_info['route_matrix'], 'tolist') else flow_info['route_matrix']
             flows.append({
                 'multicast_addr': multicast_addr,
                 'source_ip': flow_info['source_ip'],
@@ -87,7 +86,6 @@ class ActiveFlowsController(ControllerBase):
                 'path': path_names,
                 'path_dpids': path_dpids,
                 'path_edges': path_edges,
-                'route_matrix': route_matrix_list,
                 'installed_time': flow_info['installed_time']
             })
         body = json.dumps(flows, ensure_ascii=False).encode('utf-8')

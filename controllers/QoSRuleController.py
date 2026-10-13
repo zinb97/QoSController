@@ -209,7 +209,8 @@ class QoSRuleController(ControllerBase):
             dst_dpid = self.switch_app.host_ip_to_dpid.get(dst_ip)
 
             if not src_dpid or not dst_dpid:
-                raise
+                error_msg = json.dumps({'success': False, 'error': 'Source or destination host not found in topology'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
 
             pref_map = {
                 'default': WeightPref.Default,
@@ -221,8 +222,9 @@ class QoSRuleController(ControllerBase):
             }
             preference = pref_map.get(guarantee)
             path = self.switch_app.get_shortest_path(src_dpid, dst_dpid, preference)
-            if not path or len(path) <= 2:
-                raise
+            if not path or len(path) < 2:
+                error_msg = json.dumps({'success': False, 'error': 'No path found between source and destination'}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
 
             src_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(src_ip))
             dst_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(dst_ip))

@@ -1,7 +1,27 @@
+import threading
+
 import grpc
 import multicast_pb2
 import multicast_pb2_grpc
 import numpy as np
+
+# channel 复用：每次调用新建 channel 会重复 TCP + HTTP/2 握手，
+# 而组播树构建在组播加入/权重变更/重路由时都会触发，开销可观
+_stubs = {}
+_stub_lock = threading.Lock()
+
+# 单次 RPC 超时（秒）：后端无响应时不应挂死控制器事件循环
+RPC_TIMEOUT = 10
+
+
+def _get_stub(server_address):
+    """获取（并缓存）对应服务地址的 stub"""
+    if server_address not in _stubs:
+        with _stub_lock:
+            if server_address not in _stubs:
+                channel = grpc.insecure_channel(server_address)
+                _stubs[server_address] = multicast_pb2_grpc.MulticastServiceStub(channel)
+    return _stubs[server_address]
 
 
 def RL_multicast_tree(adjacency_matrix, latency_matrix, bandwidth_matrix, loss_matrix,
@@ -9,14 +29,12 @@ def RL_multicast_tree(adjacency_matrix, latency_matrix, bandwidth_matrix, loss_m
                      latency_weight=1.0, bandwidth_weight=1.0, loss_weight=1.0,
                      algorithm_type = "smart",
                      server_address='192.168.10.22:50051'):
-    """调用 gRPC 服务构建组播树"""
+    """调用 gRPC 服务构建组播树，失败时返回 (False, None)"""
 
     def unflatten_matrix(flat, size):
         return [flat[i * size: (i + 1) * size] for i in range(size)]
 
-    # 连接服务器
-    channel = grpc.insecure_channel(server_address)
-    stub = multicast_pb2_grpc.MulticastServiceStub(channel)
+    stub = _get_stub(server_address)
 
     def make_matrix(matrix):
         return multicast_pb2.AdjacencyMatrix(
@@ -38,7 +56,12 @@ def RL_multicast_tree(adjacency_matrix, latency_matrix, bandwidth_matrix, loss_m
     )
 
     # 调用 RPC
-    response = stub.BuildMulticastTree(request)
+    try:
+        response = stub.BuildMulticastTree(request, timeout=RPC_TIMEOUT)
+    except grpc.RpcError as e:
+        # 统一转换为调用方已能处理的失败返回值，由调用方记录日志
+        print(f"[gRPC] BuildMulticastTree 调用失败: {e}")
+        return False, None
 
     if response.success:
         return response.success, np.array(unflatten_matrix(response.multicast_tree.row, response.multicast_tree.size))

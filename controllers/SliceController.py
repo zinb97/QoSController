@@ -137,13 +137,16 @@ class SliceController(ControllerBase):
 
     def _build_slice_topology(self, slice_type):
         """根据切片类型构建拓扑数据"""
+        graph = getattr(self.switch_app, 'graph', None)
+        if graph is None:
+            return None
+
         slice_config = getattr(self.switch_app, 'slice_config', None)
         slice_adj_matrix = getattr(self.switch_app, 'slice_adj_matrix', None)
-        graph = getattr(self.switch_app, 'graph', None)
-        adj_matrix_nodes = sorted(graph.nodes())
-
-        if slice_config is None or slice_adj_matrix is None or graph is None:
+        if slice_config is None or slice_adj_matrix is None:
             return None
+
+        adj_matrix_nodes = sorted(graph.nodes())
 
         config_key_map = {
             'basic': 'basic',
@@ -167,21 +170,21 @@ class SliceController(ControllerBase):
         slice_nodes = set(slice_config.get(config_key, {}).get('nodes', []))
         adj_matrix = slice_adj_matrix.get(matrix_key, [])
 
-        if adj_matrix is None or (isinstance(adj_matrix, (list, np.ndarray)) and len(adj_matrix) == 0):
+        if adj_matrix is None or len(adj_matrix) == 0:
             return None
 
         net_size = len(adj_matrix_nodes)
         if net_size == 0:
             return None
 
-        # 从邻接矩阵中提取切片网络涉及的节点
-        slice_network_nodes = set()
         adj_matrix_np = adj_matrix if isinstance(adj_matrix, np.ndarray) else np.array(adj_matrix)
-        for i in range(net_size):
-            for j in range(net_size):
-                if adj_matrix_np[i, j] > 0:
-                    slice_network_nodes.add(adj_matrix_nodes[i])
-                    slice_network_nodes.add(adj_matrix_nodes[j])
+
+        # 只遍历邻接矩阵中真正存在的边，避免 O(N²) 的 Python 层双重循环
+        edge_indices = np.argwhere(adj_matrix_np > 0)
+
+        # 从邻接矩阵中提取切片网络涉及的节点
+        slice_network_nodes = {adj_matrix_nodes[i] for i, _ in edge_indices}
+        slice_network_nodes.update(adj_matrix_nodes[j] for _, j in edge_indices)
 
         # 补充：切片所属节点也必须包含在网络中
         slice_network_nodes.update(slice_nodes)
@@ -201,26 +204,24 @@ class SliceController(ControllerBase):
 
         # 构建链路列表（邻接矩阵中所有 > 0 的边）
         links = []
-        for i in range(net_size):
-            for j in range(net_size):
-                if adj_matrix_np[i, j] > 0:
-                    src_dpid = adj_matrix_nodes[i]
-                    dst_dpid = adj_matrix_nodes[j]
-                    edge_attrs = graph.edges.get((src_dpid, dst_dpid), {})
-                    if not edge_attrs:
-                        edge_attrs = graph.edges.get((dst_dpid, src_dpid), {})
-                    links.append({
-                        'src': {'dpid': src_dpid, 'port': edge_attrs.get('src_port', 0)},
-                        'dst': {'dpid': dst_dpid, 'port': edge_attrs.get('dst_port', 0)},
-                        'bw': edge_attrs.get('bw', 0),
-                        'delay': edge_attrs.get('delay', 0),
-                        'loss': edge_attrs.get('loss', 0),
-                        'load': {
-                            'rx_bps': edge_attrs.get('rx_bps', 0),
-                            'tx_bps': edge_attrs.get('tx_bps', 0),
-                            'total_bps': edge_attrs.get('total_bps', 0)
-                        }
-                    })
+        for i, j in edge_indices:
+            src_dpid = adj_matrix_nodes[i]
+            dst_dpid = adj_matrix_nodes[j]
+            edge_attrs = graph.edges.get((src_dpid, dst_dpid), {})
+            if not edge_attrs:
+                edge_attrs = graph.edges.get((dst_dpid, src_dpid), {})
+            links.append({
+                'src': {'dpid': src_dpid, 'port': edge_attrs.get('src_port', 0)},
+                'dst': {'dpid': dst_dpid, 'port': edge_attrs.get('dst_port', 0)},
+                'bw': edge_attrs.get('bw', 0),
+                'delay': edge_attrs.get('delay', 0),
+                'loss': edge_attrs.get('loss', 0),
+                'load': {
+                    'rx_bps': edge_attrs.get('rx_bps', 0),
+                    'tx_bps': edge_attrs.get('tx_bps', 0),
+                    'total_bps': edge_attrs.get('total_bps', 0)
+                }
+            })
 
         return {'switches': switches, 'links': links, 'hosts': []}
 
@@ -228,7 +229,7 @@ class SliceController(ControllerBase):
         """生成切片邻接矩阵：以每个节点为源，其余为目标，调用组播路由算法"""
         net_size = len(adj_matrix_nodes)
         if net_size == 0 or len(slice_nodes) == 0:
-            return np.zeros((net_size, net_size), dtype=np.float32).tolist()
+            return np.zeros((net_size, net_size), dtype=np.float32)
 
         # 构建完整拓扑的矩阵
         adj_matrix = nx.to_numpy_array(graph, nodelist=adj_matrix_nodes, dtype=np.float32)
@@ -239,8 +240,9 @@ class SliceController(ControllerBase):
         # 初始化切片邻接矩阵
         slice_adj_matrix = np.zeros((net_size, net_size), dtype=np.float32)
 
-        # 将 slice_nodes 中的 dpid 转换为索引
-        node_indices = [adj_matrix_nodes.index(dpid) for dpid in slice_nodes if dpid in adj_matrix_nodes]
+        # 将 slice_nodes 中的 dpid 转换为索引（建映射避免 list.index 的 O(N) 线性查找）
+        index_of = {dpid: idx for idx, dpid in enumerate(adj_matrix_nodes)}
+        node_indices = [index_of[dpid] for dpid in slice_nodes if dpid in index_of]
 
         # 对每个节点作为源，其余为目标，调用组播路由算法
         for src_idx in node_indices:
@@ -265,7 +267,7 @@ class SliceController(ControllerBase):
             except Exception as e:
                 self.switch_app.logger.warning(f"[Slice] Failed to generate route for source {src_idx}: {e}")
 
-        return slice_adj_matrix.tolist()
+        return slice_adj_matrix
 
     @route('topology', '/topology/slice/config', methods=['PUT'])
     def save_slice_config(self, req):
@@ -275,6 +277,10 @@ class SliceController(ControllerBase):
 
         # 获取完整拓扑
         graph = getattr(self.switch_app, 'graph', None)
+        if graph is None:
+            error_msg = json.dumps({'success': False, 'error': '拓扑数据不存在'}, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
         adj_matrix_nodes = sorted(graph.nodes())
         net_size = len(adj_matrix_nodes)
 
@@ -299,11 +305,12 @@ class SliceController(ControllerBase):
         }
 
         # 初始化四种切片的邻接矩阵
+        # 统一以 numpy 数组保存（仅内部使用，不经 JSON 序列化），避免 list/ndarray 反复转换
         self.switch_app.slice_adj_matrix = {
             'basic': nx.to_numpy_array(graph, nodelist=adj_matrix_nodes, dtype=np.float32),
-            'low_latency': np.zeros((net_size, net_size), dtype=np.float32).tolist() if net_size > 0 else [],
-            'low_loss': np.zeros((net_size, net_size), dtype=np.float32).tolist() if net_size > 0 else [],
-            'low_latency_loss': np.zeros((net_size, net_size), dtype=np.float32).tolist() if net_size > 0 else [],
+            'low_latency': np.zeros((net_size, net_size), dtype=np.float32),
+            'low_loss': np.zeros((net_size, net_size), dtype=np.float32),
+            'low_latency_loss': np.zeros((net_size, net_size), dtype=np.float32),
         }
 
         # 如果拓扑存在，生成各切片邻接矩阵
@@ -327,7 +334,10 @@ class SliceController(ControllerBase):
             )
 
         self.switch_app.logger.info(f"[Slice] Parsed slice config: {self.switch_app.slice_config}")
-        self.switch_app.logger.info(f"[Slice] Generated slice adjacency matrices: {self.switch_app.slice_adj_matrix}")
+        # 只记录矩阵规模，不记录矩阵内容（O(N²) 数据量会淹没日志）
+        matrix_shapes = {key: (len(mat), len(mat[0]) if len(mat) else 0)
+                         for key, mat in self.switch_app.slice_adj_matrix.items()}
+        self.switch_app.logger.info(f"[Slice] Generated slice adjacency matrices (shape): {matrix_shapes}")
 
         body = json.dumps({
             'success': True

@@ -139,7 +139,15 @@ class QoSController(app_manager.RyuApp):
         # 不可替代节点（出入度和为 1 或 2 的节点）
         self.critical_nodes = set()
 
-        self._lock = threading.Lock()
+        # RLock 而非 Lock：update_topology() 自身也要加锁，
+        # 而它会被已持锁的后台循环调用，可重入锁避免潜在死锁
+        self._lock = threading.RLock()
+
+        # 链路 tc 指标缓存: {eth_name: (bw, delay, loss, sampled_at)}
+        # tc 采样需要 fork 子进程，由独立循环负责并放在锁外执行，
+        # 避免占用 update_topology 的临界区阻塞 packet-in
+        self._link_metrics_cache = {}
+        self._link_metrics_refresh_interval = 3
 
         self.switch_name = utils.get_switch_name()
 
@@ -177,6 +185,7 @@ class QoSController(app_manager.RyuApp):
         wsgi.register(MetricsController, {topology_api_name: self})
 
         self._topo_thread = hub.spawn(self._topology_loop)
+        self._link_metrics_thread = hub.spawn(self._link_metrics_loop)
         self._stats_thread = hub.spawn(self._stats_loop)
         self._mcast_load_thread = hub.spawn(self._multicast_load_loop)
         self._link_load_thread = hub.spawn(self._link_load_loop)
@@ -185,12 +194,50 @@ class QoSController(app_manager.RyuApp):
     def _topology_loop(self):
         while True:
             try:
+                # update_topology 自行管理加锁，避免长时间持有锁阻塞 packet-in
+                self.update_topology()
                 with self._lock:
-                    self.update_topology()
                     self._update_prometheus_metrics()
             except Exception as e:
                 self.logger.warning(f"Topology loop update failed: {e}")
             hub.sleep(3)
+
+    def _link_metrics_loop(self):
+        """刷新链路 tc 指标（带宽/时延/丢包）
+
+        与拓扑更新同周期，但单独成循环且不持有 _lock：
+        tc 采样需 fork 子进程，若放在 update_topology 临界区内会阻塞 packet-in。
+        """
+        while True:
+            try:
+                self._refresh_link_metrics()
+            except Exception as e:
+                self.logger.warning(f"Link metrics refresh failed: {e}")
+            hub.sleep(self._link_metrics_refresh_interval)
+
+    def _refresh_link_metrics(self):
+        """采集缓存中已有设备的 tc 指标并更新缓存（不持有 _lock）"""
+        for dev in list(self._link_metrics_cache.keys()):
+            self._link_metrics_cache[dev] = utils.get_tc_stats_optimized(dev) + (time.time(),)
+
+    def _prime_link_metrics(self, link_list):
+        """补齐尚未采样的链路设备指标，并清理已消失设备的缓存
+
+        采样在锁外执行：子进程调用不应阻塞事件处理。
+        """
+        now = time.time()
+        live_devices = set()
+        for l in link_list:
+            src_dpid, src_port = l.src.dpid, l.src.port_no
+            eth_name = f'{self.switch_name.get(f"{src_dpid:016x}")}-eth{src_port}'
+            live_devices.add(eth_name)
+            if eth_name not in self._link_metrics_cache:
+                self._link_metrics_cache[eth_name] = utils.get_tc_stats_optimized(eth_name) + (now,)
+
+        # 已下线的设备不应继续被低频刷新任务采样
+        for dev in list(self._link_metrics_cache.keys()):
+            if dev not in live_devices:
+                del self._link_metrics_cache[dev]
 
     def _stats_loop(self):
         """定期请求交换机端口统计信息，并根据负载更新 load_balance QoS 规则"""
@@ -854,6 +901,18 @@ class QoSController(app_manager.RyuApp):
                 if multicast_addr in self.multicast_active_flows:
                     del self.multicast_active_flows[multicast_addr]
 
+    def _lookup_path_switches(self, flow_key):
+        """取已下发流的 path_switches，缓存不存在或路径上有交换机已离线时返回 None"""
+        cached = self.active_flows.get(flow_key)
+        if not cached or cached.get('type') != 'flow':
+            return None
+        path_switches = cached.get('path_switches')
+        if not path_switches:
+            return None
+        if any(ps['dpid'] not in self.datapaths for ps in path_switches):
+            return None
+        return path_switches
+
     def _add_path_flow(self, src_ip, dst_ip, path_switches):
         # 路径流表
         priority = 10
@@ -1151,7 +1210,7 @@ class QoSController(app_manager.RyuApp):
             self.logger.info(f"交换机上线: {self.sw_name(ev.switch.dp.id)} DPID={ev.switch.dp.id:016x}")
             with self._lock:
                 self.datapaths[ev.switch.dp.id] = ev.switch.dp
-                self.update_topology()
+            self.update_topology()
             # 为那些还没有安装组播流规则的组播组安装组播流规则
             for multicast_addr in list(self.multicast_groups.keys()):
                 # 检查是否已安装过流规则
@@ -1176,7 +1235,7 @@ class QoSController(app_manager.RyuApp):
         self.logger.info(f"交换机离线: {dpid} DPID={dpid}")
         with self._lock:
             self.datapaths.pop(dpid, None)
-            self.update_topology()
+        self.update_topology()
         # 重新计算受影响的流
         self._recalculate_affected_flows()
         # 重新计算受影响的组播流
@@ -1199,8 +1258,7 @@ class QoSController(app_manager.RyuApp):
 
         self.logger.info(f"新增链路: {self.sw_name(ev.link.src.dpid)}:{ev.link.src.port_no} <-> "
                          f"{self.sw_name(ev.link.dst.dpid)}:{ev.link.dst.port_no}")
-        with self._lock:
-            self.update_topology()
+        self.update_topology()
         # 检查是否有更优路径可更新
         self.check_better_path_for_active_flows()
         # 为那些还没有安装组播流规则的组播组安装组播流规则
@@ -1222,8 +1280,7 @@ class QoSController(app_manager.RyuApp):
     def _execute_link_delete(self, src_dpid, src_port, dst_dpid, dst_port):
         """真正执行链路删除"""
         self.logger.info(f"删除链路: {self.sw_name(src_dpid)}:{src_port} <-> {self.sw_name(dst_dpid)}:{dst_port}")
-        with self._lock:
-            self.update_topology()
+        self.update_topology()
         self._recalculate_affected_flows()
         self._recalculate_affected_multicast_flows(deleted_link=(src_dpid, dst_dpid))
 
@@ -1417,8 +1474,8 @@ class QoSController(app_manager.RyuApp):
         if arp_htype != 1 or arp_ptype != 0x0800:
             self.logger.debug(f"[PacketIn] 非以太网IPv4 ARP，忽略: HTYPE={arp_htype}, PTYPE={hex(arp_ptype)}")
             return
-        self.logger.info(f"[PacketIn] {self.sw_name(dpid)} {arp_op_name} ETH:{src_eth}-->{dst_eth} "
-                         f"| ARP:{src_mac}({src_ip_arp})-->{dst_mac}({dst_ip_arp})")
+        self.logger.debug(f"[PacketIn] {self.sw_name(dpid)} {arp_op_name} ETH:{src_eth}-->{dst_eth} "
+                          f"| ARP:{src_mac}({src_ip_arp})-->{dst_mac}({dst_ip_arp})")
 
         self._learn_host(dpid, in_port, src_eth, src_ip_arp, proto_tag="ARP")
 
@@ -1463,21 +1520,21 @@ class QoSController(app_manager.RyuApp):
 
         self._learn_host(dpid, in_port, src_eth, src_ip, proto_tag="IPv4")
 
-        # 日志输出
+        # 日志输出（逐包日志，降为 debug 以免打流时淹没日志）
         if tcp_pkt:
-            self.logger.info(f"[PacketIn] SW:{sw_name} TCP {src_ip}:{tcp_pkt.src_port}-->{dst_ip}:{tcp_pkt.dst_port}")
+            self.logger.debug(f"[PacketIn] SW:{sw_name} TCP {src_ip}:{tcp_pkt.src_port}-->{dst_ip}:{tcp_pkt.dst_port}")
         elif udp_pkt:
-            self.logger.info(f"[PacketIn] SW:{sw_name} UDP {src_ip}:{udp_pkt.src_port}-->{dst_ip}:{udp_pkt.dst_port}")
+            self.logger.debug(f"[PacketIn] SW:{sw_name} UDP {src_ip}:{udp_pkt.src_port}-->{dst_ip}:{udp_pkt.dst_port}")
         elif icmp_pkt:
             icmp_type = icmp_pkt.type
             if icmp_type == icmp.ICMP_ECHO_REQUEST:
-                self.logger.info(f"[PacketIn] SW:{sw_name} ICMP Echo Request {src_ip}-->{dst_ip}")
+                self.logger.debug(f"[PacketIn] SW:{sw_name} ICMP Echo Request {src_ip}-->{dst_ip}")
             elif icmp_type == icmp.ICMP_ECHO_REPLY:
-                self.logger.info(f"[PacketIn] SW:{sw_name} ICMP Echo Reply {src_ip}-->{dst_ip}")
+                self.logger.debug(f"[PacketIn] SW:{sw_name} ICMP Echo Reply {src_ip}-->{dst_ip}")
             else:
-                self.logger.info(f"[PacketIn] SW:{sw_name} ICMP Type:{icmp_type} {src_ip}-->{dst_ip}")
+                self.logger.debug(f"[PacketIn] SW:{sw_name} ICMP Type:{icmp_type} {src_ip}-->{dst_ip}")
         else:
-            self.logger.info(f"[PacketIn] SW:{sw_name} proto:{str(proto)} {src_ip}-->{dst_ip}")
+            self.logger.debug(f"[PacketIn] SW:{sw_name} proto:{str(proto)} {src_ip}-->{dst_ip}")
 
         # UDP 组播报文直接丢弃
         if udp_pkt and self._is_multicast_ip(dst_ip):
@@ -1489,12 +1546,12 @@ class QoSController(app_manager.RyuApp):
         if dst_ip in self.ip_to_mac:
             dst_eth = self.ip_to_mac[dst_ip]
         else:
-            self.logger.info(f"[PacketIn] SW:{sw_name} {dst_ip} not in ip_to_mac")
+            self.logger.debug(f"[PacketIn] SW:{sw_name} {dst_ip} not in ip_to_mac")
 
         # 路由与转发决策
         if dst_eth not in self.hosts:
             self.send_arp_request_for_ip(datapath, src_eth, src_ip, dst_ip)
-            self.logger.info(f"[ARP Flood] 模拟 {src_ip}({src_eth}) 发送 ARP 请求查询 {dst_ip}")
+            self.logger.debug(f"[ARP Flood] 模拟 {src_ip}({src_eth}) 发送 ARP 请求查询 {dst_ip}")
             self.flood_packet_to_all_host_ports(msg.data)
             return
 
@@ -1518,34 +1575,39 @@ class QoSController(app_manager.RyuApp):
             datapath.send_msg(out)
             return
 
-        # 跨交换机：计算完整路径并下发双向流表
-        path = self.get_shortest_path(src_dpid, dst_dpid)
-        if not path or len(path) < 2:
-            self.logger.warning(f"[Route] No path found from {self.sw_name(src_dpid)} to {self.sw_name(dst_dpid)}")
+        # 跨交换机：优先复用已下发的路径，仅在无缓存或缓存失效时重算
+        flow_key = (src_ip, dst_ip)
+        path_switches = self._lookup_path_switches(flow_key)
+
+        if path_switches is None:
+            path = self.get_shortest_path(src_dpid, dst_dpid)
+            if not path or len(path) < 2:
+                self.logger.warning(f"[Route] No path found from {self.sw_name(src_dpid)} to {self.sw_name(dst_dpid)}")
+                return
+
+            path_switches = self.get_path_switches(path, src_dpid, src_port, dst_dpid, dst_port)
+            self.logger.info(f"[Route] {src_ip}->{dst_ip} Path: " +
+                             ' -> '.join(f'{p["in_port"]}:{self.sw_name(p["dpid"])}:{p["out_port"]}'
+                                         for p in path_switches))
+
+            self._add_path_flow(src_ip, dst_ip, path_switches)
+
+            # 保存活跃流信息
+            self.active_flows[flow_key] = {
+                'type': 'flow',
+                'path': path,
+                'path_switches': path_switches,
+                'src_host': {'mac': src_eth, 'dpid': src_dpid, 'port': src_port},
+                'dst_host': {'mac': dst_eth, 'dpid': dst_dpid, 'port': dst_port}
+            }
+        else:
+            self.logger.debug(f"[Route] reuse cached path for {src_ip}->{dst_ip}")
+
+        # 发送当前报文：取入端口所在交换机的出端口
+        out_port = next((ps['out_port'] for ps in path_switches if ps['dpid'] == dpid), None)
+        if out_port is None:
+            self.logger.warning(f"[Route] SW:{sw_name} not on cached path of {src_ip}->{dst_ip}, drop packet")
             return
-
-        path_switches = self.get_path_switches(path, src_dpid, src_port, dst_dpid, dst_port)
-        self.logger.info(f"[Route] {src_ip}->{dst_ip} Path: " +
-                         ' -> '.join(f'{p["in_port"]}:{self.sw_name(p["dpid"])}:{p["out_port"]}'
-                                     for p in path_switches))
-
-        self._add_path_flow(src_ip, dst_ip, path_switches)
-
-        # 保存活跃流信息
-        self.active_flows[(src_ip, dst_ip)] = {
-            'type': 'flow',
-            'path': path,
-            'path_switches': path_switches,
-            'src_host': {'mac': src_eth, 'dpid': src_dpid, 'port': src_port},
-            'dst_host': {'mac': dst_eth, 'dpid': dst_dpid, 'port': dst_port}
-        }
-
-        # 发送当前报文
-        out_port = path_switches[0]['out_port']
-        for ps in path_switches:
-            if dpid == ps.get('dpid'):
-                out_port = ps.get('out_port')
-                break
         data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
         out = parser.OFPPacketOut(
             datapath=datapath, buffer_id=msg.buffer_id,
@@ -1694,18 +1756,18 @@ class QoSController(app_manager.RyuApp):
 
     def print_multicast_groups(self):
         """
-        打印当前所有组播组信息
+        打印当前所有组播组信息（成员变动时才产生，降为 debug）
         """
-        self.logger.info("========== Multicast Group State ==========")
+        self.logger.debug("========== Multicast Group State ==========")
         if not self.multicast_groups:
-            self.logger.info("  No multicast members")
+            self.logger.debug("  No multicast members")
         for group, dpid_dict in self.multicast_groups.items():
-            self.logger.info(f"  Group {group}:")
+            self.logger.debug(f"  Group {group}:")
             for dpid, mac_dict in dpid_dict.items():
-                self.logger.info(f"    Switch {dpid}:")
+                self.logger.debug(f"    Switch {dpid}:")
                 for mac, (src_ip, port) in mac_dict.items():
-                    self.logger.info(f"      MAC={mac}, IP={src_ip}, Port={port}")
-        self.logger.info("=========================================")
+                    self.logger.debug(f"      MAC={mac}, IP={src_ip}, Port={port}")
+        self.logger.debug("=========================================")
 
     # ==================== 组播流规则安装/删除 ====================
     def _install_multicast_flow_rules(self, multicast_addr):
@@ -2070,7 +2132,6 @@ class QoSController(app_manager.RyuApp):
 
     # ==================== 拓扑更新 ====================
     def update_topology(self):
-
         if not self._topology_stable:
             if time.time() - self._start_time > 5:
                 self.logger.info('Controller Init')
@@ -2081,6 +2142,14 @@ class QoSController(app_manager.RyuApp):
         link_list = get_link(self)
         host_list = get_host(self)
 
+        # 新链路的首次 tc 采样放在锁外完成，之后由低频刷新任务维护
+        self._prime_link_metrics(link_list)
+
+        with self._lock:
+            self._rebuild_graph(switch_list, link_list, host_list)
+
+    def _rebuild_graph(self, switch_list, link_list, host_list):
+        """重建 DiGraph 与派生数据，调用方需持有 _lock"""
         # 重建 DiGraph
         self.graph = nx.DiGraph()
         self.inter_switch_ports = {s.dp.id: set() for s in switch_list}
@@ -2101,7 +2170,8 @@ class QoSController(app_manager.RyuApp):
             dst_port = l.dst.port_no
 
             eth_name = f'{self.switch_name.get(f"{src_dpid:016x}")}-eth{src_port}'
-            bw, delay, loss = utils.get_tc_stats_optimized(eth_name)
+            metrics = self._link_metrics_cache.get(eth_name)
+            bw, delay, loss = metrics[:3] if metrics else (0, 0, 0)
 
             # 获取链路负载（从端口统计计算）
             rx_bps = 0
@@ -2248,15 +2318,14 @@ class QoSController(app_manager.RyuApp):
         except nx.NetworkXNoPath:
             return []
 
-    def get_path_out_port(self, src, dst, dscp=None):
-        """获取最短路径上下一个交换机的出端口"""
-        path = self.get_shortest_path(src, dst, dscp)
-        if not path or len(path) <= 1:
-            return None
-        next_hop = path[1]
-        # 从 src 到 next_hop 的边的 src_port
-        if self.graph.has_edge(src, next_hop):
-            return self.graph[src][next_hop].get('src_port')
+    def get_path_out_port(self, src, dst):
+        """获取 src → dst 这条链路的出端口
+
+        调用方传入的 (src, dst) 均为路由树上的边，本就是图中的边，
+        因此直接查边属性即可，无需再跑一次最短路计算。
+        """
+        if self.graph.has_edge(src, dst):
+            return self.graph[src][dst].get('src_port')
         return None
 
     def _request_port_stats(self):
