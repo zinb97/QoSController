@@ -677,11 +677,14 @@ class QoSController(app_manager.RyuApp):
             # QoS 规则的重新计算
             rule_id = flow_key
             rule = flow_info.get('rule')
-            self.logger.info(f"[QoS] update qos: {rule['name']}")
-
+            # 判空必须前置到解引用之前，且命中后立即 return。
+            # 原写法先解引用 rule 再判空：rule 为 None 时直接 TypeError，
+            # 把整条流的重算带崩；而判空分支又没有 return，会继续往下执行。
             if not rule or rule_id is None:
-                self.logger.info(f"[ERROR] {rule_id} 为空")
+                self.logger.info(f"[ERROR] {rule_id} 为空或规则缺失，跳过重算")
+                return
 
+            self.logger.info(f"[QoS] update qos: {rule['name']}")
             self.delete_qos_flow(rule)
 
             src_ip, dst_ip = rule['src_ip'], rule['dst_ip']
@@ -933,7 +936,16 @@ class QoSController(app_manager.RyuApp):
                 self.add_flow(sw_dp, priority, match, actions, idle_timeout=idle_timeout)
 
     def _delete_flow(self, src_ip, dst_ip):
-        """删除指定流的流表"""
+        """删除指定流的流表
+
+        删除请求的 match 必须是目标表项 match 字段的**子集**（含相同取值）。
+        `_add_path_flow` 装表时没有指定 ip_dscp（该字段在表项里是通配），
+        若删除请求反而带上 `ip_dscp=0`，按 OpenFlow 1.3 语义该请求匹配不上
+        通配的表项 —— 删除会静默落空，旧表项残留到 idle_timeout 过期，
+        期间与新装的重路由表项并存，流量可能仍走旧路径。
+
+        所以这里的 match 必须与安装时的字段集保持一致（不含 ip_dscp）。
+        """
         flow_info = self.active_flows.get((src_ip, dst_ip))
         if not flow_info:
             return
@@ -944,7 +956,7 @@ class QoSController(app_manager.RyuApp):
                 parser = sw_dp.ofproto_parser
                 ofproto = sw_dp.ofproto
                 # 删除正向流
-                match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IP, ipv4_src=src_ip, ipv4_dst=dst_ip, ip_dscp=0)
+                match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IP, ipv4_src=src_ip, ipv4_dst=dst_ip)
                 del_flow = parser.OFPFlowMod(
                     datapath=sw_dp,
                     command=ofproto.OFPFC_DELETE,
@@ -956,7 +968,7 @@ class QoSController(app_manager.RyuApp):
                 )
                 sw_dp.send_msg(del_flow)
                 # 删除反向流
-                match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IP, ipv4_src=dst_ip, ipv4_dst=src_ip, ip_dscp=0)
+                match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IP, ipv4_src=dst_ip, ipv4_dst=src_ip)
                 del_flow = parser.OFPFlowMod(
                     datapath=sw_dp,
                     command=ofproto.OFPFC_DELETE,
