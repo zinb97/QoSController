@@ -2381,11 +2381,14 @@ class QoSController(app_manager.RyuApp):
         for src, dst, attrs in self.graph.edges(data=True):
             src_name = self.sw_name(src)
             dst_name = self.sw_name(dst)
-            link_bandwidth = attrs.get('total_bps', 0)  # Mbps
-            qos_link_bandwidth_usage.labels(src_dpid=src_name, dst_dpid=dst_name).set(link_bandwidth)
+            # total_bps 在内部（图属性/路由权重/邻接矩阵）一律是 Mbps；
+            # prometheus 指标名与 help 都约定 bits/s，导出时在此统一 ×1e6，
+            # 否则消费端（backen 按 bit/s ÷1e6 换算 Mbps）会差 6 个数量级。
+            link_bandwidth_bps = attrs.get('total_bps', 0) * 1e6
+            qos_link_bandwidth_usage.labels(src_dpid=src_name, dst_dpid=dst_name).set(link_bandwidth_bps)
             qos_link_delay.labels(src_dpid=src_name, dst_dpid=dst_name).set(attrs.get('delay', 0))
             qos_link_loss.labels(src_dpid=src_name, dst_dpid=dst_name).set(attrs.get('loss', 0))
-            total_bandwidth += link_bandwidth
+            total_bandwidth += link_bandwidth_bps
 
         # 更新网络总带宽指标
         qos_network_total_bandwidth_bits.set(total_bandwidth)
