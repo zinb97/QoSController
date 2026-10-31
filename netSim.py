@@ -201,9 +201,9 @@ def run_chinanet(level=3, is_full=False, prov_depth=3, prov_width=3):
     net = Mininet(topo=topo, controller=lambda n: RemoteController(n, ip='127.0.0.1'), switch=switch)
 
     print('bind interface')
-    Intf('enp71s0f0', node=net.switches[10])
-    Intf('enp71s0f1', node=net.switches[10])
-    Intf('enp71s0f2', node=net.switches[11])
+    # Intf('enp71s0f0', node=net.switches[10])
+    # Intf('enp71s0f1', node=net.switches[10])
+    # Intf('enp71s0f2', node=net.switches[11])
     # Intf('enp71s0f0', node=net.acc[-1])
     # Intf('enp71s0f1', node=net.acc[-1])
     # Intf('enp71s0f2', node=net.acc[-1])
