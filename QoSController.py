@@ -3,6 +3,7 @@ import os
 import threading
 import time
 from collections import deque
+from typing import NamedTuple, Optional
 
 import networkx as nx
 import numpy as np
@@ -46,12 +47,25 @@ qos_switch_packet_in = Counter('qos_switch_packet_in_total', 'Total packet-in ev
 qos_switch_flows_installed = Gauge('qos_switch_flows_installed', 'Number of installed flows', ['dpid'])
 
 # 链路指标
-qos_link_bandwidth_usage = Gauge('qos_link_bandwidth_usage_bits', 'Link bandwidth usage in bits/s', ['src_dpid', 'dst_dpid'])
-qos_link_delay = Gauge('qos_link_delay_ms', 'Link delay in milliseconds', ['src_dpid', 'dst_dpid'])
-qos_link_loss = Gauge('qos_link_loss_percent', 'Link packet loss percentage', ['src_dpid', 'dst_dpid'])
+# qos_link_bandwidth_usage_bits：**单向（src→dst）实测吞吐**。
+# 口径变更：早期版本取的是 src 端口的 rx+tx（双向混在一起），同一条物理链路的
+# 两个方向各报一条，求和时同一份流量被算了两遍。现在一个方向只报一个值，
+# 对全部有向边求和 = 每条物理链路的双向总流量，无重复计数。
+qos_link_bandwidth_usage = Gauge('qos_link_bandwidth_usage_bits', 'Link one-way throughput src->dst in bits/s', ['src_dpid', 'dst_dpid'])
+# 额定速率：来自 OVS Interface 的 link_speed（网卡驱动上报的协商速率）。
+# 消费端用它替代「全网按固定 1000 Mbps 算」的假设来算带宽余量。
+qos_link_capacity = Gauge('qos_link_capacity_bits', 'Link rated capacity from OVS link_speed in bits/s', ['src_dpid', 'dst_dpid'])
+# 时延：netem 的**配置值**。被动采集拿不到 RTT，实测时延需要主动探测（尚未实现）。
+qos_link_delay = Gauge('qos_link_delay_ms', 'Link delay from netem configuration in milliseconds', ['src_dpid', 'dst_dpid'])
+# 丢包率：**实测**（tc -s 累计计数差分）。
+# 语义变更：早期版本报的是 netem 的配置值（恒定不变，与实际丢包无关）。
+qos_link_loss = Gauge('qos_link_loss_percent', 'Measured link packet loss percentage', ['src_dpid', 'dst_dpid'])
+# 丢包率配置值（netem 参数），保留用于与实测值对照，验证损伤是否真的生效
+qos_link_loss_configured = Gauge('qos_link_loss_configured_percent', 'Configured netem packet loss percentage', ['src_dpid', 'dst_dpid'])
 
 # 网络总带宽指标
-qos_network_total_bandwidth_bits = Gauge('qos_network_total_bandwidth_bits', 'Total network bandwidth usage in bits/s')
+qos_network_total_bandwidth_bits = Gauge('qos_network_total_bandwidth_bits', 'Total network throughput in bits/s (sum of per-direction link throughput)')
+qos_network_total_capacity_bits = Gauge('qos_network_total_capacity_bits', 'Total network rated capacity in bits/s (sum of per-direction link capacity)')
 
 # QoS 规则指标
 qos_rules_total = Gauge('qos_rules_total', 'Total number of QoS rules')
@@ -65,6 +79,19 @@ qos_multicast_flows = Gauge('qos_multicast_flows', 'Number of multicast flows in
 qos_controller_uptime = Gauge('qos_controller_uptime_seconds', 'Controller uptime in seconds')
 qos_topology_updates_total = Counter('qos_topology_updates_total', 'Total topology updates')
 qos_topology_update_duration = Histogram('qos_topology_update_duration_seconds', 'Topology update duration')
+
+
+class LinkSample(NamedTuple):
+    """一次链路采样结果。
+
+    - stats: 该接口的 tc 采样（配置值 + 实测累计计数）
+    - sampled_at: 采样时刻
+    - loss_measured_pct: 用本次与上次的累计计数差分算出的**实测**丢包率（%）。
+      None 表示还没有差分样本（新链路刚发现、或上一轮计数器被重置）。
+    """
+    stats: utils.LinkTcStats
+    sampled_at: float
+    loss_measured_pct: Optional[float]
 
 
 class QoSController(app_manager.RyuApp):
@@ -143,10 +170,16 @@ class QoSController(app_manager.RyuApp):
         # 而它会被已持锁的后台循环调用，可重入锁避免潜在死锁
         self._lock = threading.RLock()
 
-        # 链路 tc 指标缓存: {eth_name: (bw, delay, loss, sampled_at)}
+        # 链路 tc 指标缓存: {eth_name: LinkSample}
         # tc 采样需要 fork 子进程，由独立循环负责并放在锁外执行，
         # 避免占用 update_topology 的临界区阻塞 packet-in
         self._link_metrics_cache = {}
+        # 上一次 tc 采样，用于差分算实测丢包率
+        self._link_metrics_prev = {}
+        # OVS 接口额定速率缓存: {接口名: bit/s}（OVS Interface 的 link_speed）
+        self._ovs_link_speeds = {}
+        self._ovs_link_speeds_ts = 0.0
+        self._ovs_link_speeds_ttl = 60
         self._link_metrics_refresh_interval = 3
 
         self.switch_name = utils.get_switch_name()
@@ -216,9 +249,39 @@ class QoSController(app_manager.RyuApp):
             hub.sleep(self._link_metrics_refresh_interval)
 
     def _refresh_link_metrics(self):
-        """采集缓存中已有设备的 tc 指标并更新缓存（不持有 _lock）"""
+        """采集缓存中已有设备的 tc 指标并更新缓存（不持有 _lock）
+
+        同时用两次采样的累计计数做差分，算出**实测**丢包率：
+        内核 qdisc 丢包只累加 drops、**不计入 Sent**，所以分母是 Δsent + Δdropped。
+        """
+        self._refresh_ovs_link_speeds()
         for dev in list(self._link_metrics_cache.keys()):
-            self._link_metrics_cache[dev] = utils.get_tc_stats_optimized(dev) + (time.time(),)
+            stats = utils.get_tc_stats_optimized(dev)
+            prev = self._link_metrics_prev.get(dev)
+            loss_measured = None
+            if prev is not None:
+                d_sent = stats.packets_sent - prev.packets_sent
+                d_drop = stats.packets_dropped - prev.packets_dropped
+                # 计数回退说明设备/qdisc 被重建，这一轮不参与差分
+                if d_sent >= 0 and d_drop >= 0 and (d_sent + d_drop) > 0:
+                    loss_measured = round(d_drop * 100.0 / (d_sent + d_drop), 4)
+            self._link_metrics_prev[dev] = stats
+            self._link_metrics_cache[dev] = LinkSample(stats, time.time(), loss_measured)
+
+    def _refresh_ovs_link_speeds(self, force=False):
+        """刷新 OVS 接口额定速率缓存（默认 60s 一次）。
+
+        链路的协商速率不会频繁变化，但 OVS 里没有现成的「速率变更」事件，
+        故用 TTL 定期重读。重读失败时保留旧值，不清空——宁可沿用上次的
+        额定值，也不要让带宽余量突然变成「未知」。
+        """
+        now = time.time()
+        if not force and now - self._ovs_link_speeds_ts < self._ovs_link_speeds_ttl:
+            return
+        speeds = utils.get_ovs_interface_speeds()
+        if speeds:
+            self._ovs_link_speeds = speeds
+        self._ovs_link_speeds_ts = now
 
     def _prime_link_metrics(self, link_list):
         """补齐尚未采样的链路设备指标，并清理已消失设备的缓存
@@ -232,12 +295,16 @@ class QoSController(app_manager.RyuApp):
             eth_name = f'{self.switch_name.get(f"{src_dpid:016x}")}-eth{src_port}'
             live_devices.add(eth_name)
             if eth_name not in self._link_metrics_cache:
-                self._link_metrics_cache[eth_name] = utils.get_tc_stats_optimized(eth_name) + (now,)
+                stats = utils.get_tc_stats_optimized(eth_name)
+                # 首次采样只作为差分的基准，本轮没有实测丢包率
+                self._link_metrics_prev[eth_name] = stats
+                self._link_metrics_cache[eth_name] = LinkSample(stats, now, None)
 
         # 已下线的设备不应继续被低频刷新任务采样
         for dev in list(self._link_metrics_cache.keys()):
             if dev not in live_devices:
                 del self._link_metrics_cache[dev]
+                self._link_metrics_prev.pop(dev, None)
 
     def _stats_loop(self):
         """定期请求交换机端口统计信息，并根据负载更新 load_balance QoS 规则"""
@@ -2182,27 +2249,42 @@ class QoSController(app_manager.RyuApp):
             dst_port = l.dst.port_no
 
             eth_name = f'{self.switch_name.get(f"{src_dpid:016x}")}-eth{src_port}'
-            metrics = self._link_metrics_cache.get(eth_name)
-            bw, delay, loss = metrics[:3] if metrics else (0, 0, 0)
+            sample = self._link_metrics_cache.get(eth_name)
+            stats = sample.stats if sample is not None else utils.LinkTcStats()
+            bw, delay, loss = stats.bw_mbps, stats.delay_ms, stats.loss_configured_pct
+            # 实测丢包率（tc -s 计数差分）；还没有差分样本时为 None
+            loss_measured = sample.loss_measured_pct if sample is not None else None
 
             # 获取链路负载（从端口统计计算）
             rx_bps = 0
             tx_bps = 0
             total_bps = 0
+            # 单向 src→dst 的实测吞吐（Mbps）。
+            # src 端口的 tx 就是「从 src 发往 dst」的字节速率；dst 端口的 rx
+            # 是同一批流量的另一视角——两者是同一份数据，**不能相加**。
+            # （旧口径取 rx+tx，把双向混在一起，导致双向边求和时重复计数。）
+            oneway_bps = 0.0
             if src_dpid in self.port_stats and src_port in self.port_stats[src_dpid]:
                 rx_bps = self.port_stats[src_dpid][src_port].get('rx_bps', 0)
                 tx_bps = self.port_stats[src_dpid][src_port].get('tx_bps', 0)
                 total_bps = self.port_stats[src_dpid][src_port].get('total_bps', 0)
+                oneway_bps = tx_bps
             elif dst_dpid in self.port_stats and dst_port in self.port_stats[dst_dpid]:
                 rx_bps = self.port_stats[dst_dpid][dst_port].get('rx_bps', 0)
                 tx_bps = self.port_stats[dst_dpid][dst_port].get('tx_bps', 0)
                 total_bps = self.port_stats[dst_dpid][dst_port].get('total_bps', 0)
+                # 只有 dst 侧有统计时，用 dst 的 rx（即 src→dst 方向）作为单向值
+                oneway_bps = rx_bps
 
             # 添加双向边（保存端口和链路状态信息）
             self.graph.add_edge(src_dpid, dst_dpid,
                                src_port=src_port, dst_port=dst_port,
                                bw=bw, delay=delay, loss=loss,
-                               rx_bps=rx_bps, tx_bps=tx_bps, total_bps=total_bps)
+                               loss_measured=loss_measured,
+                               # 额定速率（bit/s）：OVS Interface 的 link_speed
+                               capacity_bps=self._ovs_link_speeds.get(eth_name, 0),
+                               rx_bps=rx_bps, tx_bps=tx_bps, total_bps=total_bps,
+                               oneway_bps=oneway_bps)
 
             # 记录级联端口
             self.inter_switch_ports[src_dpid].add(src_port)
@@ -2258,11 +2340,18 @@ class QoSController(app_manager.RyuApp):
                 'dst': {'dpid': dst_dpid, 'port': attrs.get('dst_port')},
                 'bw': attrs.get('bw', 0),
                 'delay': attrs.get('delay', 0),
+                # loss 是 netem 的**配置值**
                 'loss': attrs.get('loss', 0),
+                # loss_measured 是**实测**丢包率（tc -s 计数差分），可能为 null
+                'loss_measured': attrs.get('loss_measured'),
+                # capacity_bps 是 OVS link_speed 给出的额定速率（bit/s）
+                'capacity_bps': attrs.get('capacity_bps', 0),
                 'load': {
                     'rx_bps': attrs.get('rx_bps', 0),
                     'tx_bps': attrs.get('tx_bps', 0),
-                    'total_bps': attrs.get('total_bps', 0)
+                    'total_bps': attrs.get('total_bps', 0),
+                    # 单向 src→dst 吞吐（Mbps），与 Prometheus 口径一致
+                    'oneway_bps': attrs.get('oneway_bps', 0)
                 }
             })
 
@@ -2390,20 +2479,34 @@ class QoSController(app_manager.RyuApp):
 
         # 更新链路指标
         total_bandwidth = 0
+        total_capacity = 0
         for src, dst, attrs in self.graph.edges(data=True):
             src_name = self.sw_name(src)
             dst_name = self.sw_name(dst)
-            # total_bps 在内部（图属性/路由权重/邻接矩阵）一律是 Mbps；
+            # oneway_bps 在内部（图属性）一律是 Mbps；
             # prometheus 指标名与 help 都约定 bits/s，导出时在此统一 ×1e6，
             # 否则消费端（backen 按 bit/s ÷1e6 换算 Mbps）会差 6 个数量级。
-            link_bandwidth_bps = attrs.get('total_bps', 0) * 1e6
-            qos_link_bandwidth_usage.labels(src_dpid=src_name, dst_dpid=dst_name).set(link_bandwidth_bps)
+            # 口径：单向 src→dst 的实测吞吐。
+            oneway_bps = attrs.get('oneway_bps', 0) * 1e6
+            qos_link_bandwidth_usage.labels(src_dpid=src_name, dst_dpid=dst_name).set(oneway_bps)
+            # 额定速率：OVS Interface link_speed（bit/s），读不到时为 0
+            capacity_bps = attrs.get('capacity_bps', 0)
+            qos_link_capacity.labels(src_dpid=src_name, dst_dpid=dst_name).set(capacity_bps)
+            # 时延：netem 配置值（被动采集拿不到 RTT）
             qos_link_delay.labels(src_dpid=src_name, dst_dpid=dst_name).set(attrs.get('delay', 0))
-            qos_link_loss.labels(src_dpid=src_name, dst_dpid=dst_name).set(attrs.get('loss', 0))
-            total_bandwidth += link_bandwidth_bps
+            # 丢包率：实测值（tc -s 计数差分）。本轮没有差分样本时保持上次值，
+            # 不用 0 覆盖——「没有新样本」不等于「没有丢包」。
+            loss_measured = attrs.get('loss_measured')
+            if loss_measured is not None:
+                qos_link_loss.labels(src_dpid=src_name, dst_dpid=dst_name).set(loss_measured)
+            # 配置值（netem 参数），保留用于与实测值对照
+            qos_link_loss_configured.labels(src_dpid=src_name, dst_dpid=dst_name).set(attrs.get('loss', 0))
+            total_bandwidth += oneway_bps
+            total_capacity += capacity_bps
 
-        # 更新网络总带宽指标
+        # 更新网络总带宽指标（Σ 有向边单向吞吐 = 每条物理链路的双向总流量）
         qos_network_total_bandwidth_bits.set(total_bandwidth)
+        qos_network_total_capacity_bits.set(total_capacity)
 
         # 更新 QoS 规则指标
         qos_rules_total.set(len(self.qos_rules))

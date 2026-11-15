@@ -80,9 +80,11 @@ sudo python netSim_mcast.py -w 3     # 自定义每层节点宽度
 - `qos_hosts_count` - 主机数量
 - `qos_switch_packet_in_total` - 交换机 packet-in 事件总数
 - `qos_switch_flows_installed` - 交换机已安装流表数
-- `qos_link_bandwidth_usage_bits` - 链路带宽使用率(bits/s)
-- `qos_link_delay_ms` - 链路延迟(ms)
-- `qos_link_loss_percent` - 链路丢包率(%)
+- `qos_link_bandwidth_usage_bits` - 链路**单向（src→dst）实测吞吐**(bits/s)
+- `qos_link_capacity_bits` - 链路**额定速率**(bits/s)，来自 OVS Interface 的 `link_speed`
+- `qos_link_delay_ms` - 链路时延(ms)，netem 的**配置值**
+- `qos_link_loss_percent` - 链路丢包率(%)，**实测**（`tc -s` 计数差分）
+- `qos_link_loss_configured_percent` - 链路丢包率(%)，netem 的**配置值**（仅作对照）
 - `qos_rules_total` / `qos_rules_active` - QoS 规则总数/活跃数
 - `qos_multicast_groups` / `qos_multicast_flows` - 组播组/流数量
 - `qos_controller_uptime_seconds` - 控制器运行时间
@@ -210,13 +212,19 @@ DPID 为 16 进制 8 字节，格式：`00000000{L1}{L2:02x}0001`
   ├───────────────────────────────┼─────────┼────────────────────────────────────┤
   │ qos_switch_flows_installed    │ Gauge   │ 已安装流表数（按 dpid 标签）       │
   ├───────────────────────────────┼─────────┼────────────────────────────────────┤
-  │ qos_link_bandwidth_usage_bits │ Gauge   │ 链路带宽使用率 bits/s              │
+  │ qos_link_bandwidth_usage_bits │ Gauge   │ 链路单向(src→dst)实测吞吐 bits/s   │
   ├───────────────────────────────┼─────────┼────────────────────────────────────┤
-  │ qos_link_delay_ms             │ Gauge   │ 链路延迟 ms                        │
+  │ qos_link_capacity_bits        │ Gauge   │ 链路额定速率 bits/s（OVS speed）   │
   ├───────────────────────────────┼─────────┼────────────────────────────────────┤
-  │ qos_link_loss_percent         │ Gauge   │ 链路丢包率 %                       │
+  │ qos_link_delay_ms             │ Gauge   │ 链路延迟 ms（netem 配置值）       │
+  ├───────────────────────────────┼─────────┼────────────────────────────────────┤
+  │ qos_link_loss_percent         │ Gauge   │ 链路丢包率 %（实测，计数差分）     │
+  ├───────────────────────────────┼─────────┼────────────────────────────────────┤
+  │ qos_link_loss_configured_percent │ Gauge │ 链路丢包率 %（netem 配置值）      │
   ├───────────────────────────────┼─────────┼────────────────────────────────────┤
   │ qos_network_total_bandwidth_bits │ Gauge │ 网络实时总带宽 bits/s              │
+  ├───────────────────────────────┼─────────┼────────────────────────────────────┤
+  │ qos_network_total_capacity_bits │ Gauge │ 网络总额定速率 bits/s              │
   ├───────────────────────────────┼─────────┼────────────────────────────────────┤
   │ qos_rules_total               │ Gauge   │ QoS 规则总数                       │
   ├───────────────────────────────┼─────────┼────────────────────────────────────┤
