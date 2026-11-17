@@ -21,7 +21,6 @@ from ryu.topology.api import get_switch, get_link, get_host
 from webob import Response
 
 import utils
-from linkprobe import LinkProbe
 from controllers.QoSRuleController import QoSRuleController
 from controllers.SliceController import SliceController
 from controllers.StaticController import StaticController
@@ -56,11 +55,8 @@ qos_link_bandwidth_usage = Gauge('qos_link_bandwidth_usage_bits', 'Link one-way 
 # 额定速率：来自 OVS Interface 的 link_speed（网卡驱动上报的协商速率）。
 # 消费端用它替代「全网按固定 1000 Mbps 算」的假设来算带宽余量。
 qos_link_capacity = Gauge('qos_link_capacity_bits', 'Link rated capacity from OVS link_speed in bits/s', ['src_dpid', 'dst_dpid'])
-# 时延：netem 的**配置值**。被动采集拿不到 RTT，实测时延需要主动探测。
+# 时延：netem 的**配置值**。被动采集拿不到 RTT，实测时延需要主动探测（尚未实现）。
 qos_link_delay = Gauge('qos_link_delay_ms', 'Link delay from netem configuration in milliseconds', ['src_dpid', 'dst_dpid'])
-# 时延：**实测值**（控制器主动发 ICMP 探针测 RTT，见 linkprobe.py）。
-# 与配置值并列导出，消费端可对照「配了多少」与「实际多少」。
-qos_link_delay_measured = Gauge('qos_link_delay_measured_ms', 'Measured link delay from active ICMP probing in milliseconds', ['src_dpid', 'dst_dpid'])
 # 丢包率：**实测**（tc -s 累计计数差分）。
 # 语义变更：早期版本报的是 netem 的配置值（恒定不变，与实际丢包无关）。
 qos_link_loss = Gauge('qos_link_loss_percent', 'Measured link packet loss percentage', ['src_dpid', 'dst_dpid'])
@@ -227,10 +223,6 @@ class QoSController(app_manager.RyuApp):
         self._mcast_load_thread = hub.spawn(self._multicast_load_loop)
         self._link_load_thread = hub.spawn(self._link_load_loop)
         self._reroute_thread = hub.spawn(self._reroute_multicast_loop)
-
-        # 链路时延主动探测器（ICMP 探针，见 linkprobe.py）
-        self.probe = LinkProbe(self)
-        self._probe_thread = hub.spawn(self.probe.loop)
 
     def _topology_loop(self):
         while True:
@@ -1322,8 +1314,6 @@ class QoSController(app_manager.RyuApp):
         self.logger.info(f"交换机离线: {dpid} DPID={dpid}")
         with self._lock:
             self.datapaths.pop(dpid, None)
-        # 交换机重连后 OVS 会清空流表，探针的「回包收集流」需要重新下发
-        self.probe.on_switch_leave(dpid)
         self.update_topology()
         # 重新计算受影响的流
         self._recalculate_affected_flows()
@@ -1541,14 +1531,6 @@ class QoSController(app_manager.RyuApp):
         if arp_pkt:
             self.handle_arp(datapath, in_port, msg, eth, arp_pkt)
             return
-
-        # 主动探测的 ICMP 报文（探针请求或回包）：识别出来就直接消费，
-        # 不能进入常规转发逻辑——回包的目的 MAC 是探针假 MAC，既不是已知主机
-        # 也不在 ip_to_mac 的常规映射里，走常规逻辑会触发无意义的 ARP 查询+泛洪。
-        if ipv4_pkt and ipv4_pkt.proto == 1:  # ICMP 协议号
-            icmp_pkt = pkt.get_protocol(icmp.icmp)
-            if icmp_pkt is not None and self.probe.handle_packet(icmp_pkt):
-                return
 
         # IPv4 处理
         if ipv4_pkt:
@@ -2512,11 +2494,6 @@ class QoSController(app_manager.RyuApp):
             qos_link_capacity.labels(src_dpid=src_name, dst_dpid=dst_name).set(capacity_bps)
             # 时延：netem 配置值（被动采集拿不到 RTT）
             qos_link_delay.labels(src_dpid=src_name, dst_dpid=dst_name).set(attrs.get('delay', 0))
-            # 时延实测值：主动 ICMP 探测，尚无样本时保持未设置（不写 0）
-            measured_delay = self.probe.get_delay(src, dst)
-            if measured_delay is not None:
-                qos_link_delay_measured.labels(
-                    src_dpid=src_name, dst_dpid=dst_name).set(round(measured_delay, 3))
             # 丢包率：实测值（tc -s 计数差分）。本轮没有差分样本时保持上次值，
             # 不用 0 覆盖——「没有新样本」不等于「没有丢包」。
             loss_measured = attrs.get('loss_measured')

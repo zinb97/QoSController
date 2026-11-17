@@ -83,7 +83,6 @@ sudo python netSim_mcast.py -w 3     # 自定义每层节点宽度
 - `qos_link_bandwidth_usage_bits` - 链路**单向（src→dst）实测吞吐**(bits/s)
 - `qos_link_capacity_bits` - 链路**额定速率**(bits/s)，来自 OVS Interface 的 `link_speed`
 - `qos_link_delay_ms` - 链路时延(ms)，netem 的**配置值**
-- `qos_link_delay_measured_ms` - 链路时延(ms)，**实测**（主动 ICMP 探测，见 `linkprobe.py`）
 - `qos_link_loss_percent` - 链路丢包率(%)，**实测**（`tc -s` 计数差分）
 - `qos_link_loss_configured_percent` - 链路丢包率(%)，netem 的**配置值**（仅作对照）
 - `qos_rules_total` / `qos_rules_active` - QoS 规则总数/活跃数
@@ -101,14 +100,6 @@ QoSController.py       # RYU SDN 控制器（单文件）
   │   ├── 最短路径计算（BFS/Dijkstra，详见 DSCP 路由策略）
   │   ├── ARP 代理处理
   │   └── 组播组管理（IGMP 加入/离开，UDP 组播流规则安装）
-  │
-linkprobe.py           # 链路时延主动探测器（ICMP 探针）
-  ├── LinkProbe          # 周期发探针、匹配回包、差分算链路时延
-  │   ├── 探针身份：同网段保留 IP + locally-administered 假 MAC
-  │   ├── 「回包收集流」：各交换机 dst=假MAC → 送控制器
-  │   └── 差分法：d(A,B) = RTT_meas − RTT_base（同目标、异注入点）
-  │                    ↑ 见文件头 docstring 的完整原理说明
-  └── 产出 qos_link_delay_measured_ms
   ├── TopologyController # REST API 控制器（Web 可视化）
   └── QoSRuleController   # REST API 控制器（QoS 规则管理）
 
@@ -226,8 +217,6 @@ DPID 为 16 进制 8 字节，格式：`00000000{L1}{L2:02x}0001`
   │ qos_link_capacity_bits        │ Gauge   │ 链路额定速率 bits/s（OVS speed）   │
   ├───────────────────────────────┼─────────┼────────────────────────────────────┤
   │ qos_link_delay_ms             │ Gauge   │ 链路延迟 ms（netem 配置值）       │
-  ├───────────────────────────────┼─────────┼────────────────────────────────────┤
-  │ qos_link_delay_measured_ms    │ Gauge   │ 链路延迟 ms（实测，主动 ICMP 探测）│
   ├───────────────────────────────┼─────────┼────────────────────────────────────┤
   │ qos_link_loss_percent         │ Gauge   │ 链路丢包率 %（实测，计数差分）     │
   ├───────────────────────────────┼─────────┼────────────────────────────────────┤
