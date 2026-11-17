@@ -186,6 +186,10 @@ function updateSidebar(topo) {
             </div>
         `).join('');
     }
+
+    // 展开时最多显示 5 条，超出部分在列表内滚动
+    capListHeight(list);
+    capListHeight(hostList);
 }
 
 async function updateTopology() {

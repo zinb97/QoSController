@@ -342,6 +342,31 @@ body {
     gap: 8px;
 }
 
+/* 条目过多时：容器内滚动（max-height 由 JS 按前 5 条的实际高度设置） */
+.list-scroll {
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 4px;
+    scrollbar-width: thin;
+}
+
+.list-scroll::-webkit-scrollbar {
+    width: 6px;
+}
+
+.list-scroll::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.list-scroll::-webkit-scrollbar-thumb {
+    background: #c8cdd3;
+    border-radius: 3px;
+}
+
+.list-scroll::-webkit-scrollbar-thumb:hover {
+    background: #a9b0b8;
+}
+
 .switch-item {
     background: #f8f9fa;
     border: 1px solid #e0e4e8;
@@ -399,10 +424,6 @@ body {
     height: 12px;
     border-radius: 3px;
 }
-
-.legend-color.switch { background: #e74c3c; }
-.legend-color.link { background: #0969da; }
-.legend-color.host { background: #238636; }
 
 /* Toggle Switch */
 .toggle-row {

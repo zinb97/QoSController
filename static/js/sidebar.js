@@ -52,6 +52,8 @@ async function updateActiveFlows() {
                 `;
             }).join('');
         }
+        // 展开时最多显示 5 条，超出部分在列表内滚动
+        capListHeight(flowList);
     } catch (e) {
         console.log('Failed to fetch active flows:', e);
     }
