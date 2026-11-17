@@ -171,30 +171,25 @@
 
             <div class="sidebar-section" id="levelsSection">
                 <div class="section-title" onclick="toggleSection('levelsSection')">网络层级</div>
+                <!-- 层级定义与 netSim/cmnet.py 的 CMNetLevel 保持一致：
+                     L1 超级核心 / L2 大区中心 / L3 省网核心 / L4 城域接入。
+                     颜色取自 static/js/topology.js 的 levelColors（level 由 DPID 第 8~9 位十六进制解析）。 -->
                 <div class="legend">
                     <div class="legend-item">
                         <div class="legend-color" style="background:#e74c3c"></div>
-                        <span>L1 - 核心层 (Core)</span>
+                        <span>L1 - 超级核心 (S1~S3)</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background:#f39c12"></div>
-                        <span>L2 - 汇聚层 (Aggregation)</span>
+                        <span>L2 - 大区中心 (R4~R8)</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background:#27ae60"></div>
-                        <span>L3 - 骨干接入 (Backbone Access)</span>
+                        <span>L3 - 省网核心 (P1~P31)</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background:#3498db"></div>
-                        <span>L4 - 省网核心 (Province Core)</span>
-                    </div>
-                    <div class="legend-item">
-                        <div class="legend-color" style="background:#9b59b6"></div>
-                        <span>L5 - 省网接入 (Province Access)</span>
-                    </div>
-                    <div class="legend-item">
-                        <div class="legend-color" style="background:#95a5a6"></div>
-                        <span>L6 - 城域接入 (Metro Access)</span>
+                        <span>L4 - 城域接入 (M…)</span>
                     </div>
                 </div>
             </div>

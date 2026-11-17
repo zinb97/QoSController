@@ -1,10 +1,21 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+html, body {
+    height: 100%;
+    /* 页面本身不滚动：右侧不出现文档级滚动条。
+       侧栏内容超出时由 .sidebar 内部滚动（其滚动条已隐藏）。 */
+    overflow: hidden;
+}
+
 body {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     background: #f5f7fa;
     color: #1a1a2e;
     min-height: 100vh;
+    /* 表头高度由内容决定（实测 77px，不是硬编码的 69px），
+       整页改成纵向 flex，避免 header + main 超出视口高度 */
+    display: flex;
+    flex-direction: column;
 }
 
 /* Header */
@@ -16,6 +27,7 @@ body {
     align-items: center;
     justify-content: space-between;
     box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    flex: 0 0 auto;
 }
 
 .logo {
@@ -75,7 +87,11 @@ body {
 /* Main Content */
 .main {
     display: flex;
-    height: calc(100vh - 69px);
+    /* 原来写死 height: calc(100vh - 69px)，但表头实际高 77px，
+       77 + 831 > 视口高度 → 页面右侧出现文档级滚动条。
+       改为占满剩余高度，min-height:0 让内部子元素可以收缩。 */
+    flex: 1 1 auto;
+    min-height: 0;
 }
 
 /* Network Canvas */
