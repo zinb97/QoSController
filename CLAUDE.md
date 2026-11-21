@@ -57,6 +57,17 @@ sudo python netSim_mcast.py -w 3     # 自定义每层节点宽度
 | `POST /stats/flowentry/add` | 添加流表条目 |
 | `DELETE /stats/flowentry/clear/{dpid}` | 清空流表 |
 
+**Routing REST API（多目标联合路由 / 算力感知）:**
+| 端点 | 说明 |
+|------|------|
+| `GET /routing/algorithm` | 当前算法（`dijkstra` / `smart`） |
+| `PUT /routing/algorithm` | 切换算法 |
+| `GET /routing/weights` | 查看五项选路权重（时延/丢包/带宽/负载/算力） |
+| `PUT /routing/weights` | 调整权重，未知键忽略、非法值回退默认 |
+| `GET /routing/compute` | 查看各交换机算力占用（0~1） |
+| `PUT /routing/compute` | 注入算力占用（算力感知路由的数据入口） |
+| `DELETE /routing/compute` | 清空算力占用（回到不影响选路） |
+
 **Slice REST API (网络切片):**
 | 端点 | 说明 |
 |------|------|

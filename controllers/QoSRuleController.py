@@ -14,6 +14,54 @@ class QoSRuleController(ControllerBase):
         super(QoSRuleController, self).__init__(req, link, data, **config)
         self.switch_app = data[topology_api_name]
 
+    # SLA 数值字段 → (字段名, 单位, 上限)。上限是**物理合理性**检查，
+    # 不是业务约束：超过这些值基本可以断定单位填错了（比如把 bps 当
+    # Mbps 传），早失败比事后查「为什么限速没生效」便宜得多。
+    _SLA_FIELDS = (
+        ('target_bps', 'Mbps', 100000.0),
+        ('target_delay_ms', 'ms', 60000.0),
+        ('target_loss_pct', '%', 100.0),
+    )
+
+    # 损伤注入字段（测试/演示用）：把指定时延/丢包施加到本规则路径首跳。
+    # 与 _SLA_FIELDS 严格分开——约束只决定「选哪条路」，注入才改链路。
+    _INJECT_FIELDS = (
+        ('inject_delay_ms', 'ms', 60000.0),
+        ('inject_loss_pct', '%', 100.0),
+    )
+
+    @classmethod
+    def _parse_fields(cls, data, fields):
+        """按 (字段名, 单位, 上限) 表解析数值字段 → (dict, error)
+
+        全部可选；给了就必须是 > 0 的有限数。缺省写 None，
+        让控制器侧按「没有该项」处理。
+        """
+        out = {}
+        for key, unit, upper in fields:
+            raw = data.get(key)
+            if raw is None or raw == '':
+                out[key] = None
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return None, f'{key} must be a number (unit: {unit})'
+            if not (0 < value <= upper):
+                return None, f'{key} must be in (0, {upper:g}] {unit}'
+            out[key] = value
+        return out, None
+
+    @classmethod
+    def _parse_sla(cls, data):
+        """解析 SLA 约束字段（target_bps / target_delay_ms / target_loss_pct）"""
+        return cls._parse_fields(data, cls._SLA_FIELDS)
+
+    @classmethod
+    def _parse_injection(cls, data):
+        """解析损伤注入字段（inject_delay_ms / inject_loss_pct）"""
+        return cls._parse_fields(data, cls._INJECT_FIELDS)
+
     @route('qos', '/qos/rules', methods=['GET'])
     def get_all_qos_rules(self, req):
         """获取所有 QoS 规则"""
@@ -66,6 +114,23 @@ class QoSRuleController(ControllerBase):
                 error_msg = json.dumps({'success': False, 'error': 'Priority must be between 1 and 1000'}, ensure_ascii=False).encode('utf-8')
                 return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
 
+            # 验证 SLA 约束字段（全部可选，给了就必须是正数）
+            #   target_bps       承诺速率，单位 Mbps（落到 meter 限速）
+            #   target_delay_ms  时延上限，单位 ms（**只做选路约束**）
+            #   target_loss_pct  丢包上限，单位 %（**只做选路约束**）
+            sla_fields, sla_error = self._parse_sla(data)
+            if sla_error:
+                error_msg = json.dumps({'success': False, 'error': sla_error}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
+            # 验证损伤注入字段（可选，与上面的约束无关）
+            #   inject_delay_ms / inject_loss_pct：把指定损伤施加到本规则路径首跳，
+            #   用于构造「某条路径不满足 SLA」的场景，供其它规则避让
+            inject_fields, inject_error = self._parse_injection(data)
+            if inject_error:
+                error_msg = json.dumps({'success': False, 'error': inject_error}, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+
             # 查找源和目的主机的 DPID
             src_ip = data['src_ip']
             dst_ip = data['dst_ip']
@@ -88,10 +153,14 @@ class QoSRuleController(ControllerBase):
             preference = pref_map.get(guarantee)
 
             # 计算路径
-            path = self.switch_app.get_shortest_path(src_dpid, dst_dpid, preference)
+            # 有 SLA 目标时改用带约束的选路：先剪掉已知会违反约束的边，
+            # 剪完不可达则退回尽力而为（reason 会说明），保证规则仍能建成
+            path, sla_reason = self.switch_app.get_sla_path(src_dpid, dst_dpid, sla_fields)
             if not path or len(path) < 2:
                 error_msg = json.dumps({'success': False, 'error': 'No path found between source and destination'}, ensure_ascii=False).encode('utf-8')
                 return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+            if sla_reason:
+                self.switch_app.logger.warning(f"[SLA] rule {data.get('name')}: {sla_reason}")
 
             # 获取路径上的交换机信息
             src_host = self.switch_app.hosts.get(self.switch_app.ip_to_mac.get(src_ip))
@@ -118,6 +187,11 @@ class QoSRuleController(ControllerBase):
                 'path': path,
                 'path_switches': path_switches
             }
+            # 写入 SLA 约束与损伤注入字段（含 None，字段始终存在便于接口消费）
+            rule.update(sla_fields)
+            rule.update(inject_fields)
+            if sla_reason:
+                rule['sla_fallback'] = sla_reason
 
             self.switch_app.qos_rules[rule_id] = rule
             self.switch_app.install_qos_flow(rule)
@@ -200,6 +274,25 @@ class QoSRuleController(ControllerBase):
                 rule['guarantee'] = data['guarantee']
             if 'enabled' in data:
                 rule['enabled'] = data['enabled']
+
+            # SLA 约束字段：只要请求里出现任一字段就整体重解析，
+            # 未出现的字段保持原值（部分更新语义）
+            if any(k in data for k in ('target_bps', 'target_delay_ms', 'target_loss_pct')):
+                merged = {k: data.get(k, rule.get(k)) for k, _u, _m in self._SLA_FIELDS}
+                new_sla, sla_error = self._parse_sla(merged)
+                if sla_error:
+                    error_msg = json.dumps({'success': False, 'error': sla_error}, ensure_ascii=False).encode('utf-8')
+                    return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+                rule.update(new_sla)
+
+            # 损伤注入字段：同样按部分更新处理
+            if any(k in data for k in ('inject_delay_ms', 'inject_loss_pct')):
+                merged = {k: data.get(k, rule.get(k)) for k, _u, _m in self._INJECT_FIELDS}
+                new_inject, inject_error = self._parse_injection(merged)
+                if inject_error:
+                    error_msg = json.dumps({'success': False, 'error': inject_error}, ensure_ascii=False).encode('utf-8')
+                    return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
+                rule.update(new_inject)
 
             # 重新计算路径（如果 IP 或 guarantee 改变）
             src_ip = rule['src_ip']

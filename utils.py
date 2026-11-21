@@ -160,6 +160,167 @@ def get_tc_stats_optimized(dev):
     )
 
 
+def _run_tc_once(argv, timeout=3):
+    """执行一条 tc 命令 → (ok, 输出或错误)
+
+    注意**不能只 catch subprocess.CalledProcessError**：RYU 启动时会
+    `eventlet.monkey_patch()`，subprocess 被替换成 eventlet 的版本，
+    抛出的异常 repr 虽然仍是 "CalledProcessError"，但**不是同一个类对象**，
+    isinstance 判定为 False。只 catch 标准类会让失败落到兜底分支，
+    拿不到 stderr（于是认不出 "Operation not permitted"、也不会重试 sudo）。
+    因此这里统一按属性提取 output / returncode。
+    """
+    try:
+        out = subprocess.check_output(argv, text=True, timeout=timeout,
+                                      stderr=subprocess.STDOUT)
+        return True, (out or '').strip()
+    except Exception as e:                     # noqa: BLE001 - 见上：异常类不可靠
+        if isinstance(e, FileNotFoundError):
+            return False, 'tc not found'
+        output = getattr(e, 'output', None)
+        returncode = getattr(e, 'returncode', None)
+        if isinstance(output, bytes):
+            output = output.decode('utf-8', errors='replace')
+        text = output.strip() if isinstance(output, str) else ''
+        if text:
+            return False, text
+        if returncode is None:
+            return False, f'{type(e).__name__}: {e}'
+        return False, f'exit {returncode}'
+
+
+# 写 qdisc 需要 CAP_NET_ADMIN；读（tc qdisc show）不需要。
+# 控制器通常以普通用户运行（Mininet 才是 root），所以写操作会拿到
+# "Operation not permitted"。这里自动尝试 sudo -n（无密码 sudo）一次。
+_PERM_HINTS = ('Operation not permitted', 'Permission denied', 'not permitted')
+
+
+def _run_tc(argv, timeout=3):
+    """执行 tc 命令，写操作遇权限不足时自动尝试 `sudo -n` → (ok, 输出/错误)。
+
+    **成功时第二个返回值是命令输出**，调用方（如 `_netem_qdisc_args`）
+    要靠它解析现有 qdisc 层级；失败时是错误信息。
+    只返回 '' 会让解析方误判「没有 netem」，进而回退到替换 root——
+    那会把 htb 带宽层级冲掉。
+    """
+    ok, out = _run_tc_once(argv, timeout)
+    if ok:
+        return True, out
+    if any(hint in out for hint in _PERM_HINTS):
+        ok2, out2 = _run_tc_once(['sudo', '-n'] + list(argv), timeout)
+        if ok2:
+            return True, out2
+        return False, (f'{out2}；写 qdisc 需要 root 权限——'
+                       f'用 sudo 启动 ryu-manager，或为 /usr/sbin/tc 配置 NOPASSWD（sudoers）')
+    return False, out
+
+
+# 已有 qdisc 的识别：TCLink 建出来的层级是
+#   qdisc htb 5: root ...
+#   qdisc netem 10: parent 5:1 limit 1000 delay 1ms
+# 必须替换**netem 子队列**，用 `root` 替换会把 htb 一起冲掉，
+# 链路的带宽限制随之消失（bw 指标会掉到 0）。
+_NETEM_QDISC_RE = re.compile(r'qdisc netem ([0-9a-fA-F]+):\s+parent ([0-9a-fA-F:]+)')
+_HTB_ROOT_RE = re.compile(r'qdisc htb ([0-9a-fA-F]+):\s+root')
+
+
+def _netem_qdisc_args(dev):
+    """定位应替换的 netem qdisc → tc 的 [parent P handle H] 参数
+
+    - 已有 netem：替换它（保留父 htb）
+    - 只有 htb 根：挂到默认类 `<handle>:1` 下（TCLink 的约定），不动根
+    - 都没有：在 root 上新建一个句柄 10: 的 netem
+    """
+    ok, out = _run_tc(['tc', 'qdisc', 'show', 'dev', dev], timeout=2)
+    if ok:
+        match = _NETEM_QDISC_RE.search(out)
+        if match:
+            return ['parent', match.group(2), 'handle', match.group(1) + ':']
+        match = _HTB_ROOT_RE.search(out)
+        if match:
+            return ['parent', match.group(1) + ':1', 'handle', '10:']
+    return ['root', 'handle', '10:']
+
+
+def find_injector_device(dev):
+    """找到施加 netem 的目标设备，返回 tc 可用的设备名。
+
+    Mininet 里交换机侧的 `<sw>-eth<N>` 是 OVS 端口，直接在它上面挂 netem
+    往往失败（OVS veth 的主干被 bridge 接管）。真正的注入点是**该 OVS
+    端口对应的 veth pair 对端**，即 `ip link` 里同名但挂在主机 netns 的
+    那一半。这里不做猜测：依次尝试 `dev` 本身、`dev` 的对端（按常见
+    Mininet 命名 `<sw>-eth<N>` → `<sw>-eth<N>` 已是最外层，对端在
+    veth 的 iflink 上），任一个能被 `tc qdisc show` 读到就采用。
+
+    返回 None 表示没有可用设备——调用方应把该链路记为「无法施加损伤」，
+    而不是假装成功。
+    """
+    candidates = [dev]
+    # veth 对端：读 /sys/class/net/<dev>/iflink 拿到对端 ifindex，
+    # 再反查 /sys/class/net/*/ifindex 找到名字。读不到就算了。
+    try:
+        with open(f'/sys/class/net/{dev}/iflink') as f:
+            peer_idx = f.read().strip()
+        import os
+        for name in os.listdir('/sys/class/net'):
+            try:
+                with open(f'/sys/class/net/{name}/ifindex') as f:
+                    if f.read().strip() == peer_idx:
+                        candidates.append(name)
+                        break
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+    for cand in candidates:
+        ok, _ = _run_tc(['tc', 'qdisc', 'show', 'dev', cand], timeout=2)
+        if ok:
+            return cand
+    return None
+
+
+def set_netem(dev, delay_ms=None, loss_pct=None, jitter_ms=None, limit=1000):
+    """在 `dev` 上施加/更新 netem 时延与丢包 → (ok, 错误信息)。
+
+    参数为 None 表示该项**不动**；两者都为 None 等价于清空损伤。
+    delay 带 `jitter_ms` 时写成 `Nms Mms`（netem 原生语法）。
+
+    **替换的是已有 netem 子队列，不是 root**：Mininet 链路上是
+    `htb 5: root` + `netem 10: parent 5:1`，用 `root` 替换会把 htb
+    带宽限制一起冲掉（bw 指标随即变 0）。定位逻辑见 `_netem_qdisc_args`。
+
+    写 qdisc 需要 CAP_NET_ADMIN，普通用户运行控制器时会自动尝试
+    `sudo -n`；仍失败则返回带操作指引的错误。
+    """
+    if delay_ms is None and loss_pct is None:
+        return clear_netem(dev)
+
+    args = (['tc', 'qdisc', 'replace', 'dev', dev]
+            + _netem_qdisc_args(dev)
+            + ['netem', 'limit', str(limit)])
+    if delay_ms is not None:
+        if jitter_ms:
+            args += ['delay', f'{delay_ms}ms', f'{jitter_ms}ms']
+        else:
+            args += ['delay', f'{delay_ms}ms']
+    if loss_pct is not None:
+        args += ['loss', f'{loss_pct}%']
+    return _run_tc(args)
+
+
+def clear_netem(dev):
+    """清空设备上的 netem 损伤（保留 htb 带宽层级）→ (ok, 错误信息)。
+
+    做法是用一条不带 delay/loss 的 netem 覆盖原 netem 子队列，而不是
+    `tc qdisc del root` —— 后者会把 TCLink 建的 htb 一起删掉。
+    """
+    args = (['tc', 'qdisc', 'replace', 'dev', dev]
+            + _netem_qdisc_args(dev)
+            + ['netem', 'limit', '1000'])
+    return _run_tc(args)
+
+
 def get_ovs_interface_speeds():
     """OVS 接口额定速率 → {接口名: bit/s}。
 

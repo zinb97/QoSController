@@ -1,5 +1,6 @@
 ﻿import json
 import os
+import sys
 import threading
 import time
 from collections import deque
@@ -21,6 +22,27 @@ from ryu.topology.api import get_switch, get_link, get_host
 from webob import Response
 
 import utils
+
+# 算法包在**仓库根目录**（/opt/CPQS/algo），而控制器从 QoSController/ 下启动，
+# 默认的 sys.path 只含 QoSController 自己。这里补上仓库根，供 `import algo.*`。
+# 用 __file__ 推导而不是写死路径，deploy-tool 部署到别的绝对路径也能用。
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+# 算法包缺失时控制器仍须能跑：降级为原来的单目标 Dijkstra，而不是启动失败。
+# 打印一条 WARN 让运维知道「智能路由没生效」，避免静默退化。
+try:
+    import algo.predict as algo_predict
+    import algo.routing as algo_routing
+    ALGO_AVAILABLE = True
+except Exception as _algo_err:      # noqa: BLE001 - 导入失败原因要原样打出
+    algo_predict = None
+    algo_routing = None
+    ALGO_AVAILABLE = False
+    print(f'[WARN] algo package unavailable ({_algo_err}); '
+          f'smart routing / load prediction disabled, falling back to hop count')
+
 from controllers.QoSRuleController import QoSRuleController
 from controllers.SliceController import SliceController
 from controllers.StaticController import StaticController
@@ -70,6 +92,45 @@ qos_network_total_capacity_bits = Gauge('qos_network_total_capacity_bits', 'Tota
 # QoS 规则指标
 qos_rules_total = Gauge('qos_rules_total', 'Total number of QoS rules')
 qos_rules_active = Gauge('qos_rules_active', 'Number of active QoS rules')
+# 带 SLA 数值目标的规则数（target_bps 已配置）——用于区分「只选路」与「真的限速」
+qos_rules_with_sla = Gauge('qos_rules_with_sla', 'QoS rules with an explicit rate SLA (meter installed)')
+# 已下发 meter 的规则数（meter 安装成功才算）
+qos_rules_metered = Gauge('qos_rules_metered', 'QoS rules whose meter was installed successfully')
+# SLA 兑现状态：1=兑现 0=未达 0.5=无数据
+qos_rule_sla_compliance = Gauge('qos_rule_sla_compliance', 'SLA compliance ratio (measured/committed, capped at 1)', ['rule', 'sla_type'])
+# 实测速率对承诺速率的比值（不带上限，<1 表示没达标）
+qos_rule_sla_ratio = Gauge('qos_rule_sla_ratio', 'Measured rate / committed rate for a QoS rule', ['rule'])
+
+# ---- 多目标联合路由（2.4.2）----
+# 每次选路的耗时，按偏好类型分（可看出联合优化比单目标贵多少）
+qos_routing_decision_seconds = Histogram(
+    'qos_routing_decision_seconds', 'Path computation duration', ['preference'])
+# 选路次数，按偏好类型分
+qos_routing_decisions_total = Counter(
+    'qos_routing_decisions_total', 'Path computations', ['preference'])
+# 算力占用（0~1），由外部调度器经 REST 注入；label=交换机名
+qos_compute_load = Gauge(
+    'qos_compute_load_ratio', 'Injected compute load per switch (0=idle, 1=saturated)', ['switch'])
+# 当前有效权重（便于从 Prometheus 回看是哪套参数在起作用）
+qos_routing_weight = Gauge(
+    'qos_routing_weight', 'Active weight of each routing metric', ['metric'])
+
+# ---- 反馈式负载均衡（2.4.3）----
+# 每轮评估/重路由/跳过计数。评估数 >> 重路由数，就是「降低了反馈开销」的证据
+qos_lb_evaluated_total = Counter(
+    'qos_lb_evaluated_total', 'Load-balance rule evaluations')
+qos_lb_reroutes_total = Counter(
+    'qos_lb_reroutes_total', 'Load-balance reroutes actually performed')
+qos_lb_skipped_total = Counter(
+    'qos_lb_skipped_total', 'Load-balance evaluations skipped (below threshold / cooldown)')
+# 上一轮反馈周期耗时与规模（Gauge 而非 Counter，看「最近一轮」）
+qos_lb_cycle_duration = Gauge(
+    'qos_lb_cycle_duration_seconds', 'Duration of the last load-balance feedback cycle')
+qos_lb_cycle_rules = Gauge(
+    'qos_lb_cycle_rules', 'Number of rules seen in the last feedback cycle')
+# 预测负载：比值（预测吞吐/额定），label=有向边
+qos_link_predicted_util = Gauge(
+    'qos_link_predicted_util_ratio', 'Predicted link utilization (0~1)', ['src_dpid', 'dst_dpid'])
 
 # 组播指标
 qos_multicast_groups = Gauge('qos_multicast_groups', 'Number of active multicast groups')
@@ -126,6 +187,33 @@ class QoSController(app_manager.RyuApp):
         # QoS 规则配置: {rule_id: {name, src_ip, dst_ip, protocol, src_port, dst_port, dscp, priority, guarantee, enabled, src_dpid, dst_dpid, path, path_switches}}
         self.qos_rules = {}
         self.qos_rule_counter = 0
+
+        # ---- 多目标联合路由（2.4.2）----
+        # 实例属性而非只靠模块全局：REST 层拿到的只有 app 实例，
+        # 读不到 QoSController 模块的 ALGO_AVAILABLE，必须在这里显式挂一份，
+        # 否则 /routing/weights 会一直报 available=false（误判为算法包缺失）。
+        self.algo_available = ALGO_AVAILABLE
+        # 权重可由 REST 调整（PUT /routing/weights），默认值见 algo.routing
+        self.routing_weights = dict(algo_routing.DEFAULT_WEIGHTS) if ALGO_AVAILABLE else {}
+        # 每个交换机的算力占用（0~1，1=算力耗尽），由外部调度器经
+        # PUT /routing/compute 注入；缺省为空 = 不影响选路
+        self.compute_load = {}
+        # 选路决策计数（按偏好类型）
+        self._routing_decisions = {}
+
+        # ---- 反馈式负载均衡（2.4.3）----
+        # 每条有向边的负载预测器: {(u, v): TrendPredictor}
+        self._link_load_predictors = {}
+        # 每条规则的重路由状态: {rule_id: {'hot': 连续超阈值次数, 'last': 上次重路由时刻}}
+        self._lb_rule_state = {}
+        # 负载均衡阈值与去抖参数（可用环境变量覆盖，便于测试）
+        self._lb_high_watermark = float(os.getenv('LB_HIGH_WATERMARK', '0.75'))
+        self._lb_hot_cycles = int(os.getenv('LB_HOT_CYCLES', '3'))
+        self._lb_cooldown_s = float(os.getenv('LB_COOLDOWN_S', '8'))
+        self._lb_min_gain = float(os.getenv('LB_MIN_GAIN', '0.05'))
+        # 上一轮统计（导成指标，用来证明「不是每轮都在全量重算」）
+        self._lb_last_cycle = {'evaluated': 0, 'triggered': 0, 'skipped': 0,
+                               'ts': 0.0, 'duration': 0.0}
 
         # 拓扑相关 - 使用 networkx DiGraph
         self.graph = nx.DiGraph()        # 保存完整拓扑（节点=交换机，边=链路）
@@ -318,7 +406,27 @@ class QoSController(app_manager.RyuApp):
             hub.sleep(2)
 
     def _check_and_update_load_balance_rules(self):
-        """检查所有 load_balance QoS 规则的链路负载，必要时重新计算路径"""
+        """反馈式负载均衡（2.4.3）。
+
+        与改造前的区别，逐条对应研究内容里的痛点：
+
+        1. **从「当前负载」改成「预测负载」**：用每条边历史的 EWMA+斜率外推
+           下一步利用率，在链路真的过载前动作。
+        2. **从「每次都全量重算」改成「先判有没有必要」**：只有预测利用率
+           连续 N 次越过水位线、且不在冷却期，才真的去算新路径。评估是
+           常数级的（查预测器 + 比数值），重算才是 Dijkstra —— 这就是
+           「降低反馈开销」的落点，并导成 `qos_lb_evaluated_total` /
+           `qos_lb_reroutes_total` 两个计数，比值本身就是证据。
+        3. **加增益门槛与冷却**：新路径的联合代价必须比当前路径好
+           `_lb_min_gain` 以上才切，避免来回抖振（原来只要路径不同就切）。
+        4. **不再静默失效**：预测器没数据时退回当前实测负载（而不是当成 0），
+           额定带宽未知时跳过该边（而不是把比值算成 0）。
+
+        路径为什么切换，日志里给的是联合代价前后的数值，不再是「path changed」。
+        """
+        started = time.time()
+        evaluated = triggered = skipped = 0
+
         for rule_id, rule in list(self.qos_rules.items()):
             if rule.get('guarantee') != 'load_balance':
                 continue
@@ -330,19 +438,67 @@ class QoSController(app_manager.RyuApp):
             if not src_dpid or not dst_dpid:
                 continue
 
+            evaluated += 1
             current_path = rule.get('path', [])
-            new_path = self.get_shortest_path(src_dpid, dst_dpid, WeightPref.LoadBalance)
-            if not new_path or len(new_path) < 2:
+            state = self._lb_rule_state.setdefault(
+                rule_id, {'hot': 0, 'last': 0.0})
+
+            # ---- 1) 预测当前路径的瓶颈利用率（O(跳数)，不做搜索）----
+            util, bottleneck = self._predict_path_utilization(current_path)
+            if util is None:
+                # 没有任何可用的链路数据：不猜，跳过并留计数
+                skipped += 1
+                state['hot'] = 0
                 continue
 
-            if new_path == current_path:
+            if util < self._lb_high_watermark:
+                # 正常水位：清零连击，不要因为历史问题继续折腾
+                state['hot'] = 0
+                skipped += 1
                 continue
 
-            self.logger.info(f"[LoadBalance] {rule.get('name')}: path changed, re-routing")
+            state['hot'] += 1
+            if state['hot'] < self._lb_hot_cycles:
+                # 单次尖峰不算数（去抖）
+                skipped += 1
+                continue
+
+            now = time.time()
+            if now - state['last'] < self._lb_cooldown_s:
+                skipped += 1
+                continue
+
+            # ---- 2) 确实需要重算，才跑联合优化 ----
+            new_path, new_cost = self._joint_route(src_dpid, dst_dpid)
+            if not new_path or len(new_path) < 2 or new_path == current_path:
+                skipped += 1
+                state['hot'] = 0
+                continue
+
+            old_cost = algo_routing.path_cost(
+                self.graph, current_path,
+                weights=self.routing_weights, node_penalty=self.compute_load) \
+                if ALGO_AVAILABLE else float('inf')
+
+            # 只有新路径显著更优才切（相对改善量，避免代价量纲影响阈值）
+            gain = (old_cost - new_cost) / old_cost if old_cost > 0 else 0.0
+            if gain < self._lb_min_gain:
+                self.logger.info(
+                    f"[LoadBalance] {rule.get('name')}: hot ({util:.0%} at {self.sw_name(bottleneck[0])}"
+                    f"->{self.sw_name(bottleneck[1])}) but no better path "
+                    f"(cost {old_cost:.3f} -> {new_cost:.3f}, gain {gain:.1%})")
+                skipped += 1
+                state['hot'] = 0
+                continue
+
+            # ---- 3) 切换 ----
+            self.logger.info(
+                f"[LoadBalance] {rule.get('name')}: reroute "
+                f"(predicted util {util:.0%} at {self.sw_name(bottleneck[0])}"
+                f"->{self.sw_name(bottleneck[1])}, cost {old_cost:.3f} -> {new_cost:.3f})")
             self.logger.info(f"[LoadBalance] old path: {' -> '.join(self.sw_name(p) for p in current_path)}")
             self.logger.info(f"[LoadBalance] new path: {' -> '.join(self.sw_name(p) for p in new_path)}")
 
-            # 更新 rule 中的路径信息
             src_host = self.hosts.get(self.ip_to_mac.get(src_ip), {})
             dst_host = self.hosts.get(self.ip_to_mac.get(dst_ip), {})
             path_switches = self.get_path_switches(
@@ -357,7 +513,6 @@ class QoSController(app_manager.RyuApp):
             rule['path'] = new_path
             rule['path_switches'] = path_switches
 
-            # 更新 active_flows
             self.active_flows[rule_id] = {
                 'type': 'qos',
                 'path': new_path,
@@ -367,9 +522,74 @@ class QoSController(app_manager.RyuApp):
                 'dst_host': dst_host,
             }
 
-            # 删除旧流表，安装新流表
             self.install_qos_flow(rule)
+            triggered += 1
+            state['hot'] = 0
+            state['last'] = now
             self.logger.info(f"[LoadBalance] {rule.get('name')}: flow table updated")
+
+        # 清理已删除规则的状态，避免字典无限增长
+        for rid in list(self._lb_rule_state.keys()):
+            if rid not in self.qos_rules:
+                self._lb_rule_state.pop(rid, None)
+
+        if evaluated:
+            qos_lb_evaluated_total.inc(evaluated)
+        if triggered:
+            qos_lb_reroutes_total.inc(triggered)
+        if skipped:
+            qos_lb_skipped_total.inc(skipped)
+        self._lb_last_cycle = {
+            'evaluated': evaluated, 'triggered': triggered,
+            'skipped': skipped, 'ts': time.time(),
+            'duration': time.time() - started,
+        }
+
+    def _predict_path_utilization(self, path):
+        """预测一条路径的瓶颈利用率 → (util, (u, v)) 或 (None, None)
+
+        取路径上各跳**预测利用率的最大值**作为瓶颈。预测器样本不足时
+        退回该边的当前实测利用率（`oneway_bps / bw`），而不是当 0 ——
+        把未知当空闲，会导致过载链路被判定为「健康」而永不触发。
+        """
+        if not path or len(path) < 2:
+            return None, None
+
+        worst_util = None
+        worst_edge = None
+        for u, v in zip(path, path[1:]):
+            if not self.graph.has_edge(u, v):
+                return None, None
+            attrs = self.graph[u][v]
+            bw = attrs.get('bw') or 0
+            if bw <= 0:
+                # 额定未知：这条边不参与判断（不能当 0 也不能当 1）
+                continue
+
+            util = None
+            if ALGO_AVAILABLE:
+                pred = self._link_load_predictors.get((u, v))
+                if pred is not None and pred.ready:
+                    predicted = pred.predict(horizon=1)
+                    if predicted is not None:
+                        util = predicted / bw
+            if util is None:
+                util = (attrs.get('oneway_bps') or 0) / bw
+
+            if worst_util is None or util > worst_util:
+                worst_util, worst_edge = util, (u, v)
+
+        return worst_util, worst_edge
+
+    def _joint_route(self, src, dst):
+        """跑一次联合优化路由 → (path, cost)；算法包缺失时退回跳数最短"""
+        if ALGO_AVAILABLE:
+            return algo_routing.best_path(
+                self.graph, src, dst,
+                weights=self.routing_weights,
+                node_penalty=self.compute_load)
+        path = self.get_shortest_path(src, dst)
+        return path, 0.0
 
     def _multicast_load_loop(self):
         """定期请求组播组源交换机的流表统计，计算组播组负载"""
@@ -983,6 +1203,235 @@ class QoSController(app_manager.RyuApp):
             return None
         return path_switches
 
+    # ==================== SLA / 确定性保障 ====================
+    # 一条 QoS 规则可以带三项数值目标，全部可选：
+    #   target_bps        承诺速率（Mbps），落到 OFPMeterMod 限速 + 实测校验
+    #   target_delay_ms   时延上限（ms），落到选路约束 + netem 施加
+    #   target_loss_pct   丢包上限（%），落到选路约束 + netem 施加
+    # 什么都没有时行为与改造前完全一致（纯选路），不影响旧调用方。
+
+    def _rule_sla(self, rule):
+        """取规则的 SLA 约束目标（全部转成 float，缺省 None）
+
+        **只包含约束**：这三项决定「能不能选这条路径」，不会改变链路本身。
+        过去的实现把 target_delay_ms 同时当成 netem 施加值，相当于「承诺
+        时延不超过 20ms，然后主动给它加 20ms」——语义自相矛盾。损伤注入
+        已拆到 `_rule_injection`。
+        """
+        return {
+            'target_bps': self._positive_num(rule, 'target_bps'),
+            'target_delay_ms': self._positive_num(rule, 'target_delay_ms'),
+            'target_loss_pct': self._positive_num(rule, 'target_loss_pct'),
+        }
+
+    def _rule_injection(self, rule):
+        """取规则的损伤注入参数（与 SLA 约束完全独立）
+
+        inject_* 是**测试/演示用**的显式动作：把指定的时延/丢包施加到本规则
+        路径的首跳接口上，用来构造「这条路径不满足 SLA」的场景，供其它规则
+        的选路避让。没有这两个字段时控制器不会碰任何链路的 tc 配置。
+        """
+        return {
+            'inject_delay_ms': self._positive_num(rule, 'inject_delay_ms'),
+            'inject_loss_pct': self._positive_num(rule, 'inject_loss_pct'),
+        }
+
+    @staticmethod
+    def _positive_num(rule, key):
+        """取正值字段 → float 或 None（0/负数/非数字一律视为未设置）"""
+        value = rule.get(key)
+        if value is None or value == '':
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    def _sla_block_reason(self, attrs, sla):
+        """判断一条链路是否违反 SLA 约束 → 违反原因字符串，None 表示通过。
+
+        **只用实测值判断，不用配置值**：
+        - 带宽用 oneway_bps（OpenFlow 端口统计差分，实测）
+        - 丢包用 loss_measured（tc -s 差分，实测）
+        - 时延没有被动实测手段，只能退到 netem 配置值 delay——这一点在
+          返回的原因里标明 `(configured)`，避免被当成实测结果引用。
+
+        没有任何 SLA 目标时恒返回 None，即「不改变原有选路行为」。
+        """
+        if all(v is None for v in sla.values()):
+            return None
+
+        if sla['target_delay_ms'] is not None:
+            d = attrs.get('delay') or 0
+            if d > sla['target_delay_ms']:
+                return f"delay {d:.1f}ms (configured) > {sla['target_delay_ms']:.1f}ms"
+
+        if sla['target_loss_pct'] is not None:
+            lm = attrs.get('loss_measured')
+            if lm is not None and lm > sla['target_loss_pct']:
+                return f"loss {lm:.3f}% (measured) > {sla['target_loss_pct']:.3f}%"
+
+        if sla['target_bps'] is not None:
+            bw = attrs.get('bw') or 0
+            used = attrs.get('oneway_bps') or 0
+            # 额定带宽未知（bw=0）时不做判断：宁可不拦，也不要凭猜测拒绝一条
+            # 可能是唯一连通的路径
+            if bw > 0:
+                free = bw - used
+                if free < sla['target_bps']:
+                    return (f"free bw {free:.1f}Mbps < target "
+                            f"{sla['target_bps']:.1f}Mbps")
+        return None
+
+    def get_sla_path(self, src, dst, sla):
+        """带 SLA 约束的选路 → (path, reason)。
+
+        先按约束剪掉**已知会违反**的边再求最短路；若剪完不可达，退回
+        不剪边的原始最短路并在 reason 里说明「无满足约束的路径，已退回
+        尽力而为」。这样规则总能创建成功（不会因为瞬时指标抖动导致建
+        规则失败），但调用方能从 reason 看到这次有没有真的满足承诺。
+        """
+        if src == dst:
+            return [src], None
+        if src not in self.graph or dst not in self.graph:
+            return [], 'source or destination not in graph'
+        if all(v is None for v in sla.values()):
+            return self.get_shortest_path(src, dst), None
+
+        # 用边过滤器剪枝：违反任一项 SLA 的边剔除。
+        # 注意 networkx 的 filter_edge 签名为 `(u, v)` —— **只有两个参数**，
+        # 边属性要从宿主图 G[u][v] 里取。写成 `(u, v, attrs)` 不是「更啰嗦」
+        # 而是直接 TypeError（networkx 3.1 实测），而 subgraph_view 异常又
+        # 容易被外层的宽泛 except 吞掉，表现为「约束静默失效、总是退回尽力
+        # 而为」，比不实现还难查。
+        graph = self.graph
+
+        def _ok(u, v):
+            return self._sla_block_reason(graph[u][v], sla) is None
+
+        try:
+            sub = nx.subgraph_view(graph, filter_edge=_ok)
+            if src in sub and dst in sub and nx.has_path(sub, src, dst):
+                return list(nx.shortest_path(sub, src, dst)), None
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            pass
+        except Exception as e:
+            # 只有真正的意外才走到这里；把类型带上，避免被当成普通的「无路径」
+            self.logger.warning(f"[SLA] Constraint filtering failed "
+                                f"({type(e).__name__}): {e}")
+
+        path = self.get_shortest_path(src, dst)
+        return path, 'no path satisfies SLA constraints, fell back to best-effort'
+
+    def _rule_meter_id(self, rule):
+        """规则 → 稳定的 meter_id（同一规则重装流表时复用同一个 meter）
+
+        取值范围 1..0xFEFFFF（OFPMeterMod 的 meter_id 是 32 位，OFPM_MAX
+        之后留给虚拟端口，这里只用低段）。rule['id'] 从 1 开始，直接复用。
+        """
+        rid = rule.get('id')
+        if not isinstance(rid, int) or rid <= 0:
+            return None
+        return rid
+
+    def _install_meter(self, datapath, meter_id, rate_kbps, burst_kbits=0):
+        """在交换机上下发一个 drop 型 meter（限速）→ ok
+
+        用 `OFPMF_KBPS` 单位而不是 `OFPMF_PKTPS`：SLA 承诺的是字节速率。
+        `command=OFPMC_ADD`；若该 id 已存在（重装同一条规则）先删再加，
+        避免 "meter already exists" 被交换机静默丢掉——那样限速就失效了，
+        而流表看起来依然正常。
+        """
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+
+        # 先删旧 meter（不存在时 OVS 返回错误，忽略即可）
+        del_mod = parser.OFPMeterMod(
+            datapath=datapath,
+            command=ofproto.OFPMC_DELETE,
+            flags=ofproto.OFPMF_KBPS,
+            meter_id=meter_id,
+            bands=[],
+        )
+        datapath.send_msg(del_mod)
+
+        bands = [parser.OFPMeterBandDrop(rate=int(rate_kbps),
+                                         burst_size=int(burst_kbits))]
+        mod = parser.OFPMeterMod(
+            datapath=datapath,
+            command=ofproto.OFPMC_ADD,
+            flags=ofproto.OFPMF_KBPS,
+            meter_id=meter_id,
+            bands=bands,
+        )
+        datapath.send_msg(mod)
+        return True
+
+    def _delete_meter(self, datapath, meter_id):
+        """删除交换机上的 meter → ok"""
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+        mod = parser.OFPMeterMod(
+            datapath=datapath,
+            command=ofproto.OFPMC_DELETE,
+            flags=ofproto.OFPMF_KBPS,
+            meter_id=meter_id,
+            bands=[],
+        )
+        datapath.send_msg(mod)
+        return True
+
+    def _install_netem_for_rule(self, rule, injection):
+        """按规则的 inject_* 把时延/丢包施加到路径首跳接口 → [(dev, ok, err)]
+
+        参数是 `_rule_injection()` 的结果，**不是 SLA 约束**。只有显式配置了
+        inject_delay_ms / inject_loss_pct 的规则才会改动链路，普通业务规则
+        不会因为承诺了某个时延就被加上相应延迟。
+
+        只施加在首跳出接口，不是全路径——避免「注入 20ms 实际 20ms × 跳数」。
+        带宽不在这里做：带宽靠 meter 限速，netem 没有 rate 能力。
+
+        dev 的取法：路径首跳交换机 DPID + 出端口 → `<sw名>-eth<port>`，
+        再用 utils.find_injector_device 找到真正可挂 qdisc 的那一端。
+        """
+        results = []
+        if not injection:
+            return results
+        delay = injection.get('inject_delay_ms')
+        loss = injection.get('inject_loss_pct')
+        if delay is None and loss is None:
+            return results
+
+        path_switches = rule.get('path_switches') or []
+        if not path_switches:
+            return results
+
+        ps = path_switches[0]
+        dev = f'{self.sw_name(ps["dpid"])}-eth{ps["out_port"]}'
+        target = utils.find_injector_device(dev)
+        if target is None:
+            results.append((dev, False, 'no tc-capable device found'))
+            return results
+
+        ok, err = utils.set_netem(target, delay_ms=delay, loss_pct=loss)
+        if ok:
+            # netem 改了就必须让 tc 采样立刻重读，否则指标要等一个刷新周期
+            # （默认 3s）才反映这次写入，看起来像「没生效」
+            self._link_metrics_prev.pop(target, None)
+        results.append((target, ok, err))
+        return results
+
+    def _remove_netem_for_rule(self, rule):
+        """规则删除/更新时清掉它施加过的 netem → [(dev, ok, err)]"""
+        out = []
+        for dev in (rule.get('netem_devs') or []):
+            ok, err = utils.clear_netem(dev)
+            if ok:
+                self._link_metrics_prev.pop(dev, None)
+            out.append((dev, ok, err))
+        return out
+
     def _add_path_flow(self, src_ip, dst_ip, path_switches):
         # 路径流表
         priority = 10
@@ -1051,6 +1500,21 @@ class QoSController(app_manager.RyuApp):
         """为 QoS 规则安装流表
         rule: {name, src_ip, dst_ip, protocol, src_port, dst_port, dscp, priority,
                guarantee, src_dpid, dst_dpid, path, path_switches}
+
+        DSCP 在两类交换机上扮演**不同角色**，不能一律写进 match：
+
+        - **首跳（打标点）**：正向是 path_switches[0]（贴着源主机），反向是
+          path_switches[-1]（贴着目的主机）。这一跳的 match **不含 ip_dscp**，
+          动作里先用 `OFPActionSetField(ip_dscp=...)` 打标再转发。
+        - **其余跳（认标点）**：报文已被上游打好标，match **带 ip_dscp**，
+          只认这条标记流，避免同五元组的其它业务被误送进 QoS 路径。
+
+        为什么必须这样分：业务主机的原始报文 DSCP 通常为 0。若首跳也按
+        `ip_dscp` 匹配，规则就只能命中「进入本机前已自带该标记」的流量——
+        而正常情况下没人会先打标，等于规则永远匹配不到真实业务流（表项
+        装得上，但计数器一直为 0，且不会报任何错）。
+
+        dscp=0 表示不打标，此时全路径 match 与动作都与改动前完全一致。
         """
         src_ip = rule['src_ip']
         dst_ip = rule['dst_ip']
@@ -1066,85 +1530,156 @@ class QoSController(app_manager.RyuApp):
             self.logger.warning(f"[QoS] No path_switches for rule {rule.get('name')}")
             return False
 
-        for ps in path_switches:
+        def _build_match(in_port, ip_src, ip_dst, sport, dport):
+            """按协议填 L4 字段：sport 属于 ip_src 一侧，dport 属于 ip_dst 一侧"""
+            kwargs = {
+                'in_port': in_port,
+                'eth_type': ether.ETH_TYPE_IP,
+                'ipv4_src': ip_src,
+                'ipv4_dst': ip_dst,
+            }
+            if protocol == 'tcp':
+                kwargs['ip_proto'] = 6
+                if dport:
+                    kwargs['tcp_dst'] = dport
+                if sport:
+                    kwargs['tcp_src'] = sport
+            elif protocol == 'udp':
+                kwargs['ip_proto'] = 17
+                if dport:
+                    kwargs['udp_dst'] = dport
+                if sport:
+                    kwargs['udp_src'] = sport
+            elif protocol == 'icmp':
+                kwargs['ip_proto'] = 1
+            return kwargs
+
+        last_idx = len(path_switches) - 1
+        marking_hops = 0
+
+        # ---------- SLA：限速 meter（仅首跳，贴着源） ----------
+        # 只在源侧交换机限速就够了：这是业务进入网络的入口点，在入口把
+        # 超额的包丢掉，下游链路自然不会被这条业务挤爆。中间每跳都限速
+        # 反而会重复计数（同一条流被同速率截断多次无意义，还多占 meter）。
+        sla = self._rule_sla(rule)
+        meter_id = None
+        meter_ok = False
+        if sla['target_bps']:
+            meter_id = self._rule_meter_id(rule)
+            src_dp = self.datapaths.get(path_switches[0]['dpid'])
+            if meter_id and src_dp is not None:
+                # target_bps 是 Mbps，meter 的 OFPMF_KBPS 单位是 kbps
+                rate_kbps = int(sla['target_bps'] * 1000)
+                burst_kbits = max(1, int(rate_kbps))  # 约 1 秒的突发量
+                meter_ok = self._install_meter(src_dp, meter_id, rate_kbps, burst_kbits)
+                self.logger.info(
+                    f"[SLA] meter {meter_id} on {self.sw_name(path_switches[0]['dpid'])}: "
+                    f"{rate_kbps} kbps ({sla['target_bps']:.1f} Mbps) for rule {rule.get('name')}")
+
+        for idx, ps in enumerate(path_switches):
             sw_dp = self.datapaths.get(ps['dpid'])
             if not sw_dp:
                 continue
 
             parser = sw_dp.ofproto_parser
-            # 构建匹配字段
-            match_kwargs = {
-                'in_port': ps['in_port'],
-                'eth_type': ether.ETH_TYPE_IP,
-                'ipv4_src': src_ip,
-                'ipv4_dst': dst_ip,
-            }
 
-            # 添加协议和端口匹配
-            if protocol == 'tcp':
-                match_kwargs['ip_proto'] = 6
-                if dst_port:
-                    match_kwargs['tcp_dst'] = dst_port
-                if src_port:
-                    match_kwargs['tcp_src'] = src_port
-            elif protocol == 'udp':
-                match_kwargs['ip_proto'] = 17
-                if dst_port:
-                    match_kwargs['udp_dst'] = dst_port
-                if src_port:
-                    match_kwargs['udp_src'] = src_port
-            elif protocol == 'icmp':
-                match_kwargs['ip_proto'] = 1
-
-            # 添加 DSCP 标记
-            if dscp:
+            # ---------- 正向：src -> dst ----------
+            # 只有贴近源主机的那一跳负责打标，其余跳只认标
+            forward_marking = bool(dscp) and idx == 0
+            match_kwargs = _build_match(ps['in_port'], src_ip, dst_ip, src_port, dst_port)
+            if dscp and not forward_marking:
                 match_kwargs['ip_dscp'] = dscp
 
+            actions = []
+            if forward_marking:
+                actions.append(parser.OFPActionSetField(ip_dscp=dscp))
+            actions.append(parser.OFPActionOutput(ps['out_port']))
             match = parser.OFPMatch(**match_kwargs)
-            actions = [parser.OFPActionOutput(ps['out_port'])]
-            self.add_flow(sw_dp, priority, match, actions)
+            # 首跳且 meter 装成功时，把 meter 指令挂在正向流上
+            if meter_ok and idx == 0:
+                self._add_flow_with_meter(sw_dp, priority, match, actions, meter_id)
+            else:
+                self.add_flow(sw_dp, priority, match, actions)
 
-            # 反向流表（目的到源）
-            reverse_match_kwargs = {
-                'in_port': ps['out_port'],
-                'eth_type': ether.ETH_TYPE_IP,
-                'ipv4_src': dst_ip,
-                'ipv4_dst': src_ip,
-            }
-            if protocol == 'tcp':
-                reverse_match_kwargs['ip_proto'] = 6
-                if dst_port:
-                    reverse_match_kwargs['tcp_src'] = dst_port
-                if src_port:
-                    reverse_match_kwargs['tcp_dst'] = src_port
-            elif protocol == 'udp':
-                reverse_match_kwargs['ip_proto'] = 17
-                if dst_port:
-                    reverse_match_kwargs['udp_src'] = dst_port
-                if src_port:
-                    reverse_match_kwargs['udp_dst'] = src_port
-            elif protocol == 'icmp':
-                reverse_match_kwargs['ip_proto'] = 1
-
-            if dscp:
+            # ---------- 反向：dst -> src ----------
+            # 反向的首跳是最靠近目的主机（即正向末跳）的那台交换机
+            reverse_marking = bool(dscp) and idx == last_idx
+            reverse_match_kwargs = _build_match(ps['out_port'], dst_ip, src_ip, dst_port, src_port)
+            if dscp and not reverse_marking:
                 reverse_match_kwargs['ip_dscp'] = dscp
 
-            reverse_match = parser.OFPMatch(**reverse_match_kwargs)
-            reverse_actions = [parser.OFPActionOutput(ps['in_port'])]
-            self.add_flow(sw_dp, priority, reverse_match, reverse_actions)
+            reverse_actions = []
+            if reverse_marking:
+                reverse_actions.append(parser.OFPActionSetField(ip_dscp=dscp))
+            reverse_actions.append(parser.OFPActionOutput(ps['in_port']))
+            self.add_flow(sw_dp, priority, parser.OFPMatch(**reverse_match_kwargs), reverse_actions)
+
+            marking_hops += int(forward_marking) + int(reverse_marking)
+
+        # ---------- 损伤注入（与 SLA 约束无关，仅 inject_* 触发） ----------
+        injection = self._rule_injection(rule)
+        netem_results = self._install_netem_for_rule(rule, injection)
+        # 记下来，规则删除/更新时好清理
+        rule['netem_devs'] = [dev for dev, ok, _ in netem_results if ok]
+        rule['meter_id'] = meter_id if meter_ok else None
+        for dev, ok, err in netem_results:
+            if ok:
+                self.logger.info(f"[Inject] netem applied on {dev}: "
+                                 f"delay={injection.get('inject_delay_ms')}ms "
+                                 f"loss={injection.get('inject_loss_pct')}%")
+            else:
+                self.logger.warning(f"[Inject] netem FAILED on {dev}: {err}")
 
         self.logger.info(f"[QoS] Installed flow for rule: {rule.get('name')} ({src_ip} -> {dst_ip}, {protocol}, dscp={dscp}, priority={priority})")
         self.logger.info(f"[QoS] path: {' -> '.join(self.sw_name(p) for p in path)}")
+        if dscp:
+            # 打标点数量恒为 2（单交换机路径时为同一台设备的两个端口），
+            # 少于此数说明路径首末跳的 datapath 缺失，报文不会被标记
+            self.logger.info(f"[QoS] DSCP {dscp} marked at {marking_hops}/2 hop(s) "
+                             f"(forward at {self.sw_name(path_switches[0]['dpid'])}, "
+                             f"reverse at {self.sw_name(path_switches[-1]['dpid'])})")
         return True
 
+    def _add_flow_with_meter(self, datapath, priority, match, actions, meter_id):
+        """装表并在 instructions 里前置 OFPInstructionMeter
+
+        OpenFlow 1.3 规定 meter 指令**必须排在 apply-actions 之前**：
+        `instructions = [meter, apply_actions]`。顺序反了交换机返回
+        OFPET_BAD_INSTRUCTION，流表装不上——而且这个错误是异步回来的，
+        控制器的 send_msg 不会抛异常，只能靠交换机日志发现。
+        所以这里显式构造，不复用 add_flow（它只写 apply_actions）。
+        """
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        inst = [
+            parser.OFPInstructionMeter(meter_id=meter_id),
+            parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions),
+        ]
+        mod = parser.OFPFlowMod(
+            datapath=datapath, priority=priority, match=match,
+            instructions=inst, idle_timeout=0, hard_timeout=0,
+            flags=ofproto.OFPFF_SEND_FLOW_REM,
+        )
+        datapath.send_msg(mod)
+
     def delete_qos_flow(self, rule):
-        """删除 QoS 规则的流表"""
+        """删除 QoS 规则的流表
+
+        删除请求的 match **不能带 ip_dscp**，即便规则配了 dscp 也一样。
+        OpenFlow 1.3 的 OFPFC_DELETE 语义是「请求里的 match 字段 ⊆ 表项的
+        match 字段」才命中，即请求越通配删得越多。而 install_qos_flow 装下的
+        表项分两类：打标点（首跳）match 不含 ip_dscp、认得点 match 含 ip_dscp。
+        带上 ip_dscp 去删只能删掉后者，打标点那两条会静默残留到 idle_timeout
+        （QoS 规则表项 idle_timeout=0，永不过期），继续为该五元组分流并
+        覆盖后续重新下发的路径 —— 表现为「删了规则流量还在老路径上」。
+
+        用通配（不含 ip_dscp）即可同时覆盖两类表项，是唯一安全的选择。
+        """
         src_ip = rule['src_ip']
         dst_ip = rule['dst_ip']
         protocol = rule.get('protocol', 'any')
         src_port = rule.get('src_port')
         dst_port = rule.get('dst_port')
-        dscp = rule.get('dscp', 0)
         path_switches = rule.get('path_switches', [])
 
         for ps in path_switches:
@@ -1155,7 +1690,7 @@ class QoSController(app_manager.RyuApp):
             parser = sw_dp.ofproto_parser
             ofproto = sw_dp.ofproto
 
-            # 构建匹配字段
+            # 构建匹配字段（不带 in_port / ip_dscp，见上方说明）
             match_kwargs = {
                 'eth_type': ether.ETH_TYPE_IP,
                 'ipv4_src': src_ip,
@@ -1176,9 +1711,6 @@ class QoSController(app_manager.RyuApp):
                     match_kwargs['udp_src'] = src_port
             elif protocol == 'icmp':
                 match_kwargs['ip_proto'] = 1
-
-            if dscp:
-                match_kwargs['ip_dscp'] = dscp
 
             match = parser.OFPMatch(**match_kwargs)
             del_flow = parser.OFPFlowMod(
@@ -1213,9 +1745,6 @@ class QoSController(app_manager.RyuApp):
             elif protocol == 'icmp':
                 reverse_match_kwargs['ip_proto'] = 1
 
-            if dscp:
-                reverse_match_kwargs['ip_dscp'] = dscp
-
             reverse_match = parser.OFPMatch(**reverse_match_kwargs)
             del_flow = parser.OFPFlowMod(
                 datapath=sw_dp,
@@ -1227,6 +1756,26 @@ class QoSController(app_manager.RyuApp):
                 match=reverse_match,
             )
             sw_dp.send_msg(del_flow)
+
+        # ---------- SLA 清理 ----------
+        # 先删 meter 再清 netem：meter 挂在首跳的流表上，流表已在上面的
+        # 循环里删掉；meter 本身不会随流表消失，必须显式删，否则规则删除
+        # 后该 meter_id 仍占着且在交换机里累积，重复创建会报 id 冲突。
+        meter_id = rule.get('meter_id')
+        if meter_id:
+            src_sw = (rule.get('path_switches') or [{}])[0].get('dpid')
+            src_dp = self.datapaths.get(src_sw) if src_sw is not None else None
+            if src_dp is not None:
+                self._delete_meter(src_dp, meter_id)
+                self.logger.info(f"[SLA] meter {meter_id} removed on {self.sw_name(src_sw)}")
+
+        for dev, ok, err in self._remove_netem_for_rule(rule):
+            if ok:
+                self.logger.info(f"[SLA] netem cleared on {dev}")
+            else:
+                self.logger.warning(f"[SLA] netem clear FAILED on {dev}: {err}")
+        rule['meter_id'] = None
+        rule['netem_devs'] = []
 
         self.logger.info(f"[QoS] Deleted flow for rule: {rule.get('name')} ({src_ip} -> {dst_ip})")
 
@@ -2286,6 +2835,15 @@ class QoSController(app_manager.RyuApp):
                                rx_bps=rx_bps, tx_bps=tx_bps, total_bps=total_bps,
                                oneway_bps=oneway_bps)
 
+            # 负载历史：每条有向边一个预测器，供反馈式负载均衡外推
+            # （只用 oneway_bps 这个单向实测值，与链路指标同口径）
+            if ALGO_AVAILABLE:
+                pred = self._link_load_predictors.get((src_dpid, dst_dpid))
+                if pred is None:
+                    pred = algo_predict.TrendPredictor(maxlen=10, alpha=0.5)
+                    self._link_load_predictors[(src_dpid, dst_dpid)] = pred
+                pred.push(oneway_bps)
+
             # 记录级联端口
             self.inter_switch_ports[src_dpid].add(src_port)
             self.inter_switch_ports[dst_dpid].add(dst_port)
@@ -2387,37 +2945,83 @@ class QoSController(app_manager.RyuApp):
 
     # ==================== 最短路径（使用 networkx） ====================
     def get_shortest_path(self, src, dst, preference=None):
-        """使用 networkx Dijkstra 算法计算最短路径
-        dscp: 1=时延优先, 2=负载优先, 3=丢包率优先, 4=带宽优先, None=跳数
+        """路径计算入口。
+
+        单目标偏好（bandwidth / loss / latency / load_balance）保持原语义，
+        便于与历史结果对照；`smart_algorithm` 走多目标联合优化
+        （`algo.routing`），也是算力路由（2.4.2）的实际落点。
+
+        **负载口径修正**：load_balance 原来用 `total_bps`（rx+tx，双向之和）
+        与 `bw`（单向额定）相比，比值天然偏大，同一份流量在两个方向各算
+        一次，导致「看起来一直很挤」。现在改用 `oneway_bps`（单向 src→dst
+        实测吞吐），与链路指标导出同口径。
         """
         if src == dst:
             return [src]
         if src not in self.graph or dst not in self.graph:
             return []
+
+        label = getattr(preference, 'name', 'default')
+        start = time.time()
         try:
+            path = self._compute_path(src, dst, preference)
+        finally:
+            # 选路耗时按偏好分开统计：联合优化比单目标贵多少一目了然
+            try:
+                qos_routing_decision_seconds.labels(preference=label).observe(
+                    time.time() - start)
+                qos_routing_decisions_total.labels(preference=label).inc()
+            except Exception:
+                pass
+        return path
+
+    def _compute_path(self, src, dst, preference):
+        """实际求解（由 get_shortest_path 包一层指标）"""
+        try:
+            if preference == WeightPref.SmartAlgorithm and ALGO_AVAILABLE:
+                # 多目标联合优化：时延/丢包/带宽/负载/算力余量加权
+                path, _cost = algo_routing.best_path(
+                    self.graph, src, dst,
+                    weights=self.routing_weights,
+                    node_penalty=self.compute_load)
+                return path
             if preference == WeightPref.Bandwidth:
                 def weight_bw(u, v, d):
                     bw = d.get("bw", 0)
                     return 1.0 / (bw + 0.001)
-                path = nx.shortest_path(self.graph, src, dst, weight=weight_bw)
-            elif preference == WeightPref.LossRate:
-                path = nx.shortest_path(self.graph, src, dst, weight='loss')
-            elif preference == WeightPref.LoadBalance:
+                return nx.shortest_path(self.graph, src, dst, weight=weight_bw)
+            if preference == WeightPref.LossRate:
+                return nx.shortest_path(self.graph, src, dst, weight='loss')
+            if preference == WeightPref.LoadBalance:
                 def weight_load(u, v, d):
                     bw = d.get("bw", 0.1)
-                    load= d.get("total_bps", 0)
+                    # oneway_bps 是该方向实测吞吐（Mbps）；缺失时退回 0
+                    load = d.get("oneway_bps") or 0
                     return 1 / (bw - load) if bw > load else 999
-                path = nx.shortest_path(self.graph, src, dst, weight=weight_load)
-            elif preference == WeightPref.Latency:
-                path = nx.shortest_path(self.graph, src, dst, weight='delay')
-            elif preference == WeightPref.SmartAlgorithm:
-                # todo 调用智能算法
-                path = nx.shortest_path(self.graph, src, dst)
-            else:
-                path = nx.shortest_path(self.graph, src, dst)
-            return path
+                return nx.shortest_path(self.graph, src, dst, weight=weight_load)
+            if preference == WeightPref.Latency:
+                return nx.shortest_path(self.graph, src, dst, weight='delay')
+            return nx.shortest_path(self.graph, src, dst)
         except nx.NetworkXNoPath:
             return []
+        except Exception as e:
+            # 联合优化出问题时退回跳数最短，别让选路整体失败
+            if preference == WeightPref.SmartAlgorithm:
+                self.logger.warning(f"[Routing] smart path failed ({type(e).__name__}: {e}), "
+                                    f"falling back to hop count")
+                try:
+                    return nx.shortest_path(self.graph, src, dst)
+                except nx.NetworkXNoPath:
+                    return []
+            raise
+
+    def explain_path(self, path):
+        """逐项拆解一条路径的选路代价（供 REST 展示「为什么选它」）"""
+        if not ALGO_AVAILABLE:
+            return {'path': list(path or []), 'error': 'algo package unavailable'}
+        return algo_routing.explain_path(
+            self.graph, path, weights=self.routing_weights,
+            node_penalty=self.compute_load)
 
     def get_path_out_port(self, src, dst):
         """获取 src → dst 这条链路的出端口
@@ -2511,6 +3115,79 @@ class QoSController(app_manager.RyuApp):
         # 更新 QoS 规则指标
         qos_rules_total.set(len(self.qos_rules))
         qos_rules_active.set(sum(1 for r in self.qos_rules.values() if r.get('enabled', True)))
+
+        # ---- 选路与负载均衡的状态导出 ----
+        # 权重：让 Prometheus 侧能回看「当时用的是哪套参数」，否则同一指标
+        # 在不同时间段不可比
+        for key, value in (self.routing_weights or {}).items():
+            qos_routing_weight.labels(metric=key).set(value)
+        # 算力占用：0 表示未注入（不影响选路）。显式导出 0 而不是不导出，
+        # 这样「没配」和「配了 0」在时序上可区分（后者会有写入历史）
+        for dpid, load in (self.compute_load or {}).items():
+            qos_compute_load.labels(switch=self.sw_name(dpid)).set(max(0.0, min(float(load), 1.0)))
+        # 上一轮反馈周期规模与耗时
+        cyc = self._lb_last_cycle or {}
+        qos_lb_cycle_rules.set(cyc.get('evaluated', 0))
+        qos_lb_cycle_duration.set(cyc.get('duration', 0.0))
+        # 预测利用率：逐条有向边导出，预测器没热身的边退回当前实测比值
+        for (u, v), pred in list(self._link_load_predictors.items()):
+            if not self.graph.has_edge(u, v):
+                continue
+            attrs = self.graph[u][v]
+            bw = attrs.get('bw') or 0
+            if bw <= 0:
+                continue
+            value = None
+            if pred.ready:
+                value = pred.predict(horizon=1)
+            if value is None:
+                value = attrs.get('oneway_bps') or 0
+            qos_link_predicted_util.labels(
+                src_dpid=self.sw_name(u), dst_dpid=self.sw_name(v)
+            ).set(min(max(value / bw, 0.0), 1.0))
+
+        # SLA 兑现度：承诺速率 vs 实测速率。
+        # 实测值取规则**首跳出接口**的 oneway_bps（OpenFlow 端口统计差分，
+        # 与链路指标同口径），单位 Mbps —— 与该链路上这条业务的实际吞吐
+        # 是同一份数据，不是估算。
+        #
+        # 局限（写进 detail/指标说明，别当精确值读）：
+        # 首跳出接口上可能同时跑着别的流量，oneway_bps 是**整条链路**的
+        # 吞吐而不是单条规则的。所以这个比值是「该规则所在链路的饱和度」，
+        # 用来看 SLA 有没有被挤爆够用，用来看单条流的精确速率不够。
+        # 要拿到单条流的字节数，得按 match 查 flow_stats —— 属后续工作。
+        sla_rules = [r for r in self.qos_rules.values() if r.get('target_bps')]
+        metered = [r for r in sla_rules if r.get('meter_id')]
+        qos_rules_with_sla.set(len(sla_rules))
+        qos_rules_metered.set(len(metered))
+
+        # 规则会被删，旧标签值必须显式清掉，否则 Prometheus 里残留
+        # 已不存在规则的比值（Gauge 的 label 组合不会自动回收）
+        live_labels = set()
+        for rule in sla_rules:
+            name = str(rule.get('name') or rule.get('id'))
+            live_labels.add(name)
+            target = rule.get('target_bps')
+            if not target:
+                continue
+            measured = 0.0
+            ps = rule.get('path_switches') or []
+            if ps and self.graph.has_node(ps[0]['dpid']):
+                u, out_port = ps[0]['dpid'], ps[0]['out_port']
+                # 找到首跳出端口对应的那条边，取它的单向实测吞吐
+                for nxt in self.graph.successors(u):
+                    edge_attrs = self.graph[u][nxt]
+                    if edge_attrs.get('src_port') == out_port:
+                        measured = edge_attrs.get('oneway_bps') or 0
+                        break
+            ratio = measured / target if target > 0 else 0
+            qos_rule_sla_ratio.labels(rule=name).set(ratio)
+            qos_rule_sla_compliance.labels(rule=name, sla_type='bandwidth').set(min(ratio, 1.0))
+
+        for stale in getattr(self, '_sla_label_cache', set()) - live_labels:
+            qos_rule_sla_ratio.labels(rule=stale).set(0)
+            qos_rule_sla_compliance.labels(rule=stale, sla_type='bandwidth').set(0)
+        self._sla_label_cache = live_labels
 
         # 更新组播指标
         qos_multicast_groups.set(len(self.multicast_groups))
