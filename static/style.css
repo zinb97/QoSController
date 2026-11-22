@@ -196,23 +196,6 @@ body {
     gap: 16px;
 }
 
-.algo-badge {
-    padding: 4px 10px;
-    background: #238636;
-    border-radius: 12px;
-    font-size: 11px;
-    color: #fff;
-    font-weight: 500;
-}
-
-.algo-badge.dijkstra {
-    background: #0969da;
-}
-
-.algo-option:hover {
-    border-color: #ccc !important;
-}
-
 #mynetwork {
     flex: 1;
     background: #ffffff;
@@ -304,7 +287,6 @@ body {
 .sidebar-section.collapsed .legend,
 .sidebar-section.collapsed .stats-grid,
 .sidebar-section.collapsed .toggle-row,
-.sidebar-section.collapsed .routing-select,
 .sidebar-section.collapsed .deterministic-form {
     display: none;
 }

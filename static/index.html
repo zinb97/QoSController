@@ -75,7 +75,6 @@
                 </div>
                 <div class="last-update">
                     <span>最后更新: <span id="lastUpdate">--:--:--</span></span>
-                    <span class="algo-badge" id="algoBadge">🧠 智能算法</span>
                 </div>
             </div>
             <div id="mynetwork"></div>
@@ -98,42 +97,6 @@
                     margin-bottom: 8px;
                 ">全部折叠</button>
             </div>
-            <div class="sidebar-section" id="routingSection">
-                <div class="section-title" onclick="toggleSection('routingSection')">路由算法</div>
-                <div class="routing-select" style="margin-bottom: 8px;">
-                    <div class="algo-options" id="algoOptions" style="display: flex; flex-direction: column; gap: 6px;">
-                        <div class="algo-option" data-value="smart" onclick="selectAlgorithm('smart')" style="
-                            padding: 10px 12px;
-                            background: #f8f9fa;
-                            border: 1px solid #e0e4e8;
-                            border-radius: 8px;
-                            cursor: pointer;
-                            transition: all 0.2s;
-                            display: flex;
-                            align-items: center;
-                            gap: 8px;
-                        ">
-                            <span style="font-size: 16px;">🧠</span>
-                            <span style="color: #444; font-size: 13px;">智能算法</span>
-                        </div>
-                        <div class="algo-option" data-value="dijkstra" onclick="selectAlgorithm('dijkstra')" style="
-                            padding: 10px 12px;
-                            background: #f8f9fa;
-                            border: 1px solid #e0e4e8;
-                            border-radius: 8px;
-                            cursor: pointer;
-                            transition: all 0.2s;
-                            display: flex;
-                            align-items: center;
-                            gap: 8px;
-                        ">
-                            <span style="font-size: 16px;">📊</span>
-                            <span style="color: #444; font-size: 13px;">迪杰斯特拉算法</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
             <div class="sidebar-section" id="statsSection">
                 <div class="section-title" onclick="toggleSection('statsSection')">统计信息</div>
                 <div class="stats-grid">
@@ -452,14 +415,43 @@
                     </div>
                     <div class="qos-form-group">
                         <label>保障偏好</label>
-                        <select id="qosGuarantee">
-                            <option value="default">默认规则</option>
-                            <option value="bandwidth">带宽优先</option>
-                            <option value="latency">时延优先</option>
-                            <option value="loss_rate">丢包率优先</option>
+                        <select id="qosGuarantee" onchange="updateSlaFields()">
+                            <option value="best_effort">跳数最短</option>
+                            <option value="bandwidth">带宽最大</option>
+                            <option value="latency">时延最低</option>
+                            <option value="loss">丢包率最低</option>
+                            <option value="bandwidth_guarantee">带宽保障</option>
                             <option value="load_balance">负载均衡</option>
-                            <option value="smart_algorithm">智能算法（综合考虑）</option>
+                            <option value="smart_algorithm">多目标优化</option>
                         </select>
+                    </div>
+                </div>
+                <!-- SLA 参数配置 -->
+                <div id="slaParametersSection" style="margin-top: 12px; padding: 12px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #667eea;">
+                    <div style="font-weight: 600; font-size: 13px; color: #333; margin-bottom: 12px;">📊 SLA 参数配置</div>
+                    <div class="qos-form-row">
+                        <div class="qos-form-group" id="targetBpsGroup">
+                            <label>目标带宽 (Mbps)</label>
+                            <input type="number" id="qosTargetBps" min="0.1" max="10000" step="0.1" placeholder="例如：10">
+                            <div class="qos-info">承诺的带宽速率</div>
+                        </div>
+                        <div class="qos-form-group" id="targetLatencyGroup">
+                            <label>目标时延 (ms)</label>
+                            <input type="number" id="qosTargetLatency" min="1" max="1000" step="1" placeholder="例如：50">
+                            <div class="qos-info">最大允许时延</div>
+                        </div>
+                    </div>
+                    <div class="qos-form-row">
+                        <div class="qos-form-group" id="targetJitterGroup">
+                            <label>目标抖动 (ms)</label>
+                            <input type="number" id="qosTargetJitter" min="1" max="500" step="1" placeholder="例如：10">
+                            <div class="qos-info">最大允许抖动</div>
+                        </div>
+                        <div class="qos-form-group" id="targetLossGroup">
+                            <label>目标丢包率 (0-1)</label>
+                            <input type="number" id="qosTargetLoss" min="0" max="1" step="0.001" placeholder="例如：0.01">
+                            <div class="qos-info">最大允许丢包率（0.01=1%）</div>
+                        </div>
                     </div>
                 </div>
                 <div class="qos-success" id="qosSuccess">QoS 规则保存成功！</div>

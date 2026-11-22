@@ -29,7 +29,6 @@ window.onload = function() {
     updateMulticastWeights();
     updateMulticastActiveFlows();
     updateQosRules();
-    loadRoutingAlgorithm();
     loadLinkEventState();
     loadMulticastRerouteState();
     topologyIntervalId = setInterval(updateTopology, 2000);

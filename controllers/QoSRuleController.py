@@ -96,8 +96,8 @@ class QoSRuleController(ControllerBase):
                 return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)
 
             # 验证 guarantee
-            guarantee = data.get('guarantee', 'default')
-            valid_guarantees = ('default', 'bandwidth', 'latency', 'loss_rate', 'load_balance', 'smart_algorithm')
+            guarantee = data.get('guarantee', 'best_effort')
+            valid_guarantees = ('best_effort', 'bandwidth', 'latency', 'loss', 'bandwidth_guarantee', 'load_balance', 'smart_algorithm')
             if guarantee not in valid_guarantees:
                 error_msg = json.dumps({'success': False, 'error': f'Invalid guarantee. Must be one of: {valid_guarantees}'}, ensure_ascii=False).encode('utf-8')
                 return Response(content_type='application/json; charset=UTF-8', body=error_msg, status=400)

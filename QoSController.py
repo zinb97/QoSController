@@ -984,12 +984,13 @@ class QoSController(app_manager.RyuApp):
                 return
 
             pref_map = {
-                'default': None,
-                'bandwidth': WeightPref.Bandwidth,
-                'latency': WeightPref.Latency,
-                'loss_rate': WeightPref.LossRate,
-                'load_balance': WeightPref.LoadBalance,
-                'smart_algorithm': WeightPref.SmartAlgorithm
+                'best_effort': None,                      # 跳数最短（Dijkstra）
+                'bandwidth': WeightPref.Bandwidth,        # 带宽最大（Dijkstra）
+                'latency': WeightPref.Latency,            # 时延最低（Dijkstra）
+                'loss': WeightPref.LossRate,              # 丢包率最低（Dijkstra）
+                'bandwidth_guarantee': WeightPref.Bandwidth,  # 带宽保障（需配置 target_bps）
+                'load_balance': WeightPref.LoadBalance,   # 负载均衡
+                'smart_algorithm': WeightPref.SmartAlgorithm  # 多目标优化
             }
             preference = pref_map.get(guarantee)
             new_path = self.get_shortest_path(src_dpid, dst_dpid, preference)
@@ -1057,12 +1058,13 @@ class QoSController(app_manager.RyuApp):
                 src_host = self.hosts.get(self.ip_to_mac.get(src_ip), {})
                 dst_host = self.hosts.get(self.ip_to_mac.get(dst_ip), {})
                 pref_map = {
-                    'default': None,
-                    'bandwidth': WeightPref.Bandwidth,
-                    'latency': WeightPref.Latency,
-                    'loss_rate': WeightPref.LossRate,
-                    'load_balance': WeightPref.LoadBalance,
-                    'smart_algorithm': WeightPref.SmartAlgorithm
+                    'best_effort': None,                      # 跳数最短（Dijkstra）
+                    'bandwidth': WeightPref.Bandwidth,        # 带宽最大（Dijkstra）
+                    'latency': WeightPref.Latency,            # 时延最低（Dijkstra）
+                    'loss': WeightPref.LossRate,              # 丢包率最低（Dijkstra）
+                    'bandwidth_guarantee': WeightPref.Bandwidth,  # 带宽保障（需配置 target_bps）
+                    'load_balance': WeightPref.LoadBalance,   # 负载均衡
+                    'smart_algorithm': WeightPref.SmartAlgorithm  # 多目标优化
                 }
                 guarantee = rule.get('guarantee')
                 preference = pref_map.get(guarantee)

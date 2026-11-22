@@ -424,7 +424,15 @@ function openQosModal(ruleId) {
                 document.getElementById('qosDstPort').value = rule.dst_port || '';
                 document.getElementById('qosDscp').value = rule.dscp || 0;
                 document.getElementById('qosPriority').value = rule.priority || 100;
-                document.getElementById('qosGuarantee').value = rule.guarantee || 'default';
+                document.getElementById('qosGuarantee').value = rule.guarantee || 'best_effort';
+
+                // SLA 参数
+                document.getElementById('qosTargetBps').value = rule.target_bps || '';
+                document.getElementById('qosTargetLatency').value = rule.target_latency_ms || '';
+                document.getElementById('qosTargetJitter').value = rule.target_jitter_ms || '';
+                document.getElementById('qosTargetLoss').value = rule.target_loss || '';
+
+                updateSlaFields();
             })
             .catch(e => console.log('Failed to load QoS rule:', e));
     } else {
@@ -436,10 +444,48 @@ function openQosModal(ruleId) {
         document.getElementById('qosDstPort').value = '';
         document.getElementById('qosDscp').value = 0;
         document.getElementById('qosPriority').value = 100;
-        document.getElementById('qosGuarantee').value = 'default';
+        document.getElementById('qosGuarantee').value = 'best_effort';
+
+        // 清空 SLA 参数
+        document.getElementById('qosTargetBps').value = '';
+        document.getElementById('qosTargetLatency').value = '';
+        document.getElementById('qosTargetJitter').value = '';
+        document.getElementById('qosTargetLoss').value = '';
+
+        updateSlaFields();
     }
 
     document.getElementById('qosModal').classList.add('active');
+}
+
+// 根据保障类型显示/隐藏 SLA 参数字段
+function updateSlaFields() {
+    const guarantee = document.getElementById('qosGuarantee').value;
+
+    // SLA 参数配置区域
+    const slaSection = document.getElementById('slaParametersSection');
+
+    // 所有字段的容器
+    const bpsGroup = document.getElementById('targetBpsGroup');
+    const latencyGroup = document.getElementById('targetLatencyGroup');
+    const jitterGroup = document.getElementById('targetJitterGroup');
+    const lossGroup = document.getElementById('targetLossGroup');
+
+    // 默认隐藏所有
+    bpsGroup.style.display = 'none';
+    latencyGroup.style.display = 'none';
+    jitterGroup.style.display = 'none';
+    lossGroup.style.display = 'none';
+
+    // 根据保障类型显示对应字段
+    if (guarantee === 'bandwidth_guarantee') {
+        // 带宽保障：需要配置目标带宽
+        slaSection.style.display = 'block';
+        bpsGroup.style.display = 'block';
+    } else {
+        // 其他类型不需要 SLA 参数，隐藏整个区域
+        slaSection.style.display = 'none';
+    }
 }
 
 function closeQosModal() {
@@ -458,8 +504,14 @@ async function saveQosRule() {
     const priority = parseInt(document.getElementById('qosPriority').value) || 100;
     const guarantee = document.getElementById('qosGuarantee').value;
 
+    // 获取 SLA 参数
+    const targetBps = document.getElementById('qosTargetBps').value;
+    const targetLatency = document.getElementById('qosTargetLatency').value;
+    const targetJitter = document.getElementById('qosTargetJitter').value;
+    const targetLoss = document.getElementById('qosTargetLoss').value;
+
     if (!srcIp || !dstIp) {
-        document.getElementById('qosError').textContent = '请填写名称、源 IP 和目的 IP';
+        document.getElementById('qosError').textContent = '请填写源 IP 和目的 IP';
         document.getElementById('qosError').style.display = 'block';
         return;
     }
@@ -475,6 +527,20 @@ async function saveQosRule() {
         priority: priority,
         guarantee: guarantee
     };
+
+    // 添加 SLA 参数（如果有值）
+    if (targetBps) {
+        ruleData.target_bps = parseFloat(targetBps);
+    }
+    if (targetLatency) {
+        ruleData.target_latency_ms = parseFloat(targetLatency);
+    }
+    if (targetJitter) {
+        ruleData.target_jitter_ms = parseFloat(targetJitter);
+    }
+    if (targetLoss) {
+        ruleData.target_loss = parseFloat(targetLoss);
+    }
 
     try {
         showLoading('正在保存 QoS 规则...');
@@ -502,7 +568,7 @@ async function saveQosRule() {
         }
     } catch (e) {
         hideLoading();
-        document.getElementById('qosError').textContent = 'QoS 规则保存失败';
+        document.getElementById('qosError').textContent = 'QoS 规则保存失败: ' + e.message;
         document.getElementById('qosError').style.display = 'block';
     }
 }
