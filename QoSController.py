@@ -23,13 +23,7 @@ from webob import Response
 
 import utils
 
-# 算法包在**仓库根目录**（/opt/CPQS/algo），而控制器从 QoSController/ 下启动，
-# 默认的 sys.path 只含 QoSController 自己。这里补上仓库根，供 `import algo.*`。
-# 用 __file__ 推导而不是写死路径，deploy-tool 部署到别的绝对路径也能用。
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-
+# 算法包已集成到 QoSController 目录中，直接导入即可。
 # 算法包缺失时控制器仍须能跑：降级为原来的单目标 Dijkstra，而不是启动失败。
 # 打印一条 WARN 让运维知道「智能路由没生效」，避免静默退化。
 try:
