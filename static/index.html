@@ -133,6 +133,7 @@
                     </div>
                 </div>
             </div>
+
             <div class="sidebar-section" id="statsSection">
                 <div class="section-title" onclick="toggleSection('statsSection')">统计信息</div>
                 <div class="stats-grid">
@@ -247,7 +248,7 @@
             </div>
 
             <div class="sidebar-section" id="flowsSection">
-                <div class="section-title" onclick="toggleSection('flowsSection')">活跃流表</div>
+                <div class="section-title" onclick="toggleSection('flowsSection')">活跃流</div>
                 <div class="switch-list" id="flowList">
                     <div class="switch-item">
                         <div class="switch-info">
@@ -287,6 +288,61 @@
                         <div class="switch-info">
                             <div class="switch-name">切片配置</div>
                             <div class="switch-dpid">点击填写配置参数</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 确定性时延分析 -->
+            <div class="sidebar-section" id="deterministicSection">
+                <div class="section-title" onclick="toggleSection('deterministicSection')">确定性时延分析</div>
+                <div class="deterministic-form" style="padding: 8px 0;">
+                    <div style="margin-bottom: 12px;">
+                        <label style="display: block; font-size: 12px; color: #666; margin-bottom: 4px;">源交换机</label>
+                        <select id="detSrcSwitch" style="width: 100%; padding: 8px; border: 1px solid #e0e4e8; border-radius: 6px; font-size: 13px; background: white;">
+                            <option value="">请选择...</option>
+                        </select>
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <label style="display: block; font-size: 12px; color: #666; margin-bottom: 4px;">目标交换机</label>
+                        <select id="detDstSwitch" style="width: 100%; padding: 8px; border: 1px solid #e0e4e8; border-radius: 6px; font-size: 13px; background: white;">
+                            <option value="">请选择...</option>
+                        </select>
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <label style="display: block; font-size: 12px; color: #666; margin-bottom: 4px;">SLA 要求 (ms)</label>
+                        <input type="number" id="detSla" value="50" min="1" max="1000" style="width: 100%; padding: 8px; border: 1px solid #e0e4e8; border-radius: 6px; font-size: 13px;">
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;">
+                        <div>
+                            <label style="display: block; font-size: 12px; color: #666; margin-bottom: 4px;">速率 (Mbps)</label>
+                            <input type="number" id="detRate" value="10" min="1" max="10000" style="width: 100%; padding: 8px; border: 1px solid #e0e4e8; border-radius: 6px; font-size: 13px;">
+                        </div>
+                        <div>
+                            <label style="display: block; font-size: 12px; color: #666; margin-bottom: 4px;">突发 (KB)</label>
+                            <input type="number" id="detBurst" value="100" min="1" max="10000" style="width: 100%; padding: 8px; border: 1px solid #e0e4e8; border-radius: 6px; font-size: 13px;">
+                        </div>
+                    </div>
+                    <button onclick="verifyDeterministic()" style="
+                        width: 100%;
+                        padding: 10px;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        color: white;
+                        border: none;
+                        border-radius: 6px;
+                        font-size: 13px;
+                        font-weight: 500;
+                        cursor: pointer;
+                        transition: transform 0.2s, box-shadow 0.2s;
+                    " onmouseover="this.style.transform='translateY(-1px)'; this.style.boxShadow='0 4px 12px rgba(102, 126, 234, 0.4)'" onmouseout="this.style.transform=''; this.style.boxShadow=''">
+                        🔍 验证时延上界
+                    </button>
+
+                    <!-- 结果显示 -->
+                    <div id="detResult" style="margin-top: 12px; display: none;">
+                        <div style="padding: 12px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #667eea;">
+                            <div style="font-size: 12px; color: #666; margin-bottom: 8px;">验证结果</div>
+                            <div id="detResultContent"></div>
                         </div>
                     </div>
                 </div>
@@ -533,5 +589,6 @@
     <script src="/static/js/slice.js"></script>
     <script src="/static/js/sidebar.js"></script>
     <script src="/static/js/modals.js"></script>
+    <script src="/static/js/deterministic.js"></script>
 </body>
 </html>

@@ -304,7 +304,8 @@ body {
 .sidebar-section.collapsed .legend,
 .sidebar-section.collapsed .stats-grid,
 .sidebar-section.collapsed .toggle-row,
-.sidebar-section.collapsed .routing-select {
+.sidebar-section.collapsed .routing-select,
+.sidebar-section.collapsed .deterministic-form {
     display: none;
 }
 

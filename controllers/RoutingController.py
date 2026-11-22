@@ -15,8 +15,10 @@ if _REPO_ROOT not in sys.path:
 
 try:
     import algo.routing as algo_routing
+    import algo.deterministic as algo_deterministic
 except Exception:      # noqa: BLE001
     algo_routing = None
+    algo_deterministic = None
 
 topology_api_name = 'topology_api'
 
@@ -187,3 +189,152 @@ class RoutingController(ControllerBase):
                 except ValueError:
                     continue
         return None
+
+    @route('routing', '/routing/deterministic/verify', methods=['POST'])
+    def verify_deterministic(self, req):
+        """验证路径的确定性保障能力（研究内容 2.4.1 / 测试用例 12）
+
+        请求体：
+        {
+            "src_dpid": "0000000001000001",  # 源交换机 DPID
+            "dst_dpid": "0000000002000001",  # 目标交换机 DPID
+            "sla_ms": 50,                     # SLA 时延要求（ms）
+            "traffic": {
+                "rate_mbps": 10,              # 到达速率（Mbps）
+                "burst_kb": 100               # 突发大小（KB）
+            }
+        }
+
+        返回：
+        {
+            "path": ["dpid1", "dpid2", ...],
+            "delay_bound_ms": 38.4,           # 时延上界
+            "sla_ms": 50,
+            "satisfied": true,                 # 是否满足 SLA
+            "margin_ms": 11.6,                # 余量
+            "hops": 2
+        }
+        """
+        if algo_deterministic is None:
+            error_msg = json.dumps({
+                'success': False,
+                'error': 'algo.deterministic module not available'
+            }, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8',
+                          body=error_msg, status=503)
+
+        try:
+            data = json.loads(req.body.decode('utf-8'))
+
+            # 解析参数
+            src = self._resolve_dpid(data.get('src_dpid'))
+            dst = self._resolve_dpid(data.get('dst_dpid'))
+            if src is None or dst is None:
+                raise ValueError('Invalid src_dpid or dst_dpid')
+
+            sla_ms = float(data.get('sla_ms', 0))
+            if sla_ms <= 0:
+                raise ValueError('sla_ms must be positive')
+
+            traffic = data.get('traffic', {})
+            if not isinstance(traffic, dict):
+                raise ValueError('traffic must be an object')
+
+            # 计算路径（使用当前配置的路由算法）
+            path = self.switch_app.get_shortest_path(src, dst)
+
+            if not path:
+                result = {
+                    'success': False,
+                    'error': 'No path found',
+                    'src_dpid': f'{src:016x}',
+                    'dst_dpid': f'{dst:016x}'
+                }
+                body = json.dumps(result, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8',
+                              body=body, status=404)
+
+            # 验证确定性 SLA
+            result = algo_deterministic.verify_deterministic_sla(
+                path, self.switch_app.graph, sla_ms, traffic
+            )
+
+            # 添加成功标志
+            result['success'] = True
+
+            # 将 DPID 转为十六进制字符串（便于阅读）
+            result['path'] = [f'{dpid:016x}' for dpid in result['path']]
+
+            body = json.dumps(result, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
+
+        except Exception as e:
+            error_msg = json.dumps({
+                'success': False,
+                'error': str(e)
+            }, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8',
+                          body=error_msg, status=400)
+
+    @route('routing', '/routing/explain', methods=['POST'])
+    def explain_route(self, req):
+        """解释路径选择的代价构成（调试/验证用）
+
+        请求体：
+        {
+            "src_dpid": "0000000001000001",
+            "dst_dpid": "0000000002000001"
+        }
+
+        返回：路径的详细代价分解（见 algo.routing.explain_path）
+        """
+        if algo_routing is None:
+            error_msg = json.dumps({
+                'success': False,
+                'error': 'algo.routing module not available'
+            }, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8',
+                          body=error_msg, status=503)
+
+        try:
+            data = json.loads(req.body.decode('utf-8'))
+
+            src = self._resolve_dpid(data.get('src_dpid'))
+            dst = self._resolve_dpid(data.get('dst_dpid'))
+            if src is None or dst is None:
+                raise ValueError('Invalid src_dpid or dst_dpid')
+
+            # 计算路径
+            path = self.switch_app.get_shortest_path(src, dst)
+
+            if not path:
+                result = {
+                    'success': False,
+                    'error': 'No path found'
+                }
+                body = json.dumps(result, ensure_ascii=False).encode('utf-8')
+                return Response(content_type='application/json; charset=UTF-8',
+                              body=body, status=404)
+
+            # 解释路径
+            explanation = self.switch_app.explain_path(path)
+            explanation['success'] = True
+
+            # 转换 DPID 为十六进制
+            if 'path' in explanation:
+                explanation['path'] = [f'{dpid:016x}' for dpid in explanation['path']]
+            if 'hops' in explanation:
+                for hop in explanation['hops']:
+                    hop['from'] = f'{hop["from"]:016x}'
+                    hop['to'] = f'{hop["to"]:016x}'
+
+            body = json.dumps(explanation, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8', body=body)
+
+        except Exception as e:
+            error_msg = json.dumps({
+                'success': False,
+                'error': str(e)
+            }, ensure_ascii=False).encode('utf-8')
+            return Response(content_type='application/json; charset=UTF-8',
+                          body=error_msg, status=400)
